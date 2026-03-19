@@ -1,11 +1,11 @@
-name: Oracle Hunter
+name: Oracle ARM Hunter
 on:
   schedule:
-    - cron: '*/5 * * * *' # Her 5 dakikada bir çalışır
+    - cron: '*/5 * * * *' # 5 dakikada bir Frankfurt kapısını yumruklar
   workflow_dispatch:
 
 jobs:
-  hunt:
+  hunt-arm:
     runs-on: ubuntu-latest
     steps:
       - name: Install OCI CLI
@@ -18,16 +18,21 @@ jobs:
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
           echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
-          # Config içindeki key yolunu düzeltiyoruz
           sed -i 's|key_file=.*|key_file=/home/runner/.oci/key.pem|' ~/.oci/config
 
-      - name: Try Create Instance (Micro)
+      - name: Try Create ARM Instance
+        env:
+          MY_IMAGE_ID: ${{ secrets.IMAGE_ID }}
+          MY_SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          MY_COMP_ID: ${{ secrets.COMPARTMENT_ID }}
         run: |
           oci compute instance launch \
             --availability-domain "UvXp:EU-FRANKFURT-1-AD-1" \
-            --compartment-id "${{ secrets.COMPARTMENT_ID }}" \
-            --shape "VM.Standard.E2.1.Micro" \
-            --display-name "Binance-Bot-Micro" \
-            --image-id "${{ secrets.IMAGE_ID }}" \
-            --subnet-id "${{ secrets.SUBNET_ID }}" \
-            --assign-public-ip true
+            --compartment-id "$MY_COMP_ID" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
+            --display-name "Binance-Bot-ARM-Master" \
+            --image-id "$MY_IMAGE_ID" \
+            --subnet-id "$MY_SUBNET_ID" \
+            --assign-public-ip true \
+            --wait-for-state RUNNING
