@@ -1,22 +1,8 @@
-name: Oracle ARM Hunter
-on:
-  schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
-
-jobs:
-  hunt-arm:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install OCI CLI
-        run: |
-          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
-          echo "/home/runner/bin" >> $GITHUB_PATH
-
-      - name: Create OCI Config Manually
+- name: Create OCI Config Manually
         run: |
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
+          # Anahtarı temizleyerek oluştur (Gizli Windows karakterlerini siler)
+          echo "${{ secrets.OCI_KEY_FILE }}" | tr -d '\r' > ~/.oci/key.pem
           chmod 600 ~/.oci/key.pem
           
           cat <<EOF > ~/.oci/config
@@ -29,20 +15,3 @@ jobs:
           EOF
           
           chmod 600 ~/.oci/config
-
-      - name: Try Create ARM Instance
-        env:
-          MY_IMAGE_ID: ${{ secrets.IMAGE_ID }}
-          MY_SUBNET_ID: ${{ secrets.SUBNET_ID }}
-          MY_COMP_ID: ${{ secrets.COMPARTMENT_ID }}
-          SUPPRESS_LABEL_WARNING: True # O sığır uyarıyı kapatır
-        run: |
-          oci compute instance launch \
-            --availability-domain "UvXp:EU-FRANKFURT-1-AD-1" \
-            --compartment-id "$MY_COMP_ID" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
-            --display-name "Binance-Bot-ARM" \
-            --source-details "{\"image_id\": \"$MY_IMAGE_ID\", \"source_type\": \"image\"}" \
-            --subnet-id "$MY_SUBNET_ID" \
-            --assign-public-ip true
