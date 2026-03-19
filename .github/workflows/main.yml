@@ -18,7 +18,8 @@ jobs:
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
           echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
-          sed -i 's|key_file=.*|key_file=/home/runner/.oci/key.pem|' ~/.oci/config
+          chmod 600 ~/.oci/config
+          chmod 600 ~/.oci/key.pem
 
       - name: Try Create ARM Instance
         env:
