@@ -1,0 +1,33 @@
+name: Oracle Hunter
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Her 5 dakikada bir çalışır
+  workflow_dispatch:
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "/home/runner/bin" >> $GITHUB_PATH
+
+      - name: Configure OCI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
+          # Config içindeki key yolunu düzeltiyoruz
+          sed -i 's|key_file=.*|key_file=/home/runner/.oci/key.pem|' ~/.oci/config
+
+      - name: Try Create Instance (Micro)
+        run: |
+          oci compute instance launch \
+            --availability-domain "UvXp:EU-FRANKFURT-1-AD-1" \
+            --compartment-id "${{ secrets.COMPARTMENT_ID }}" \
+            --shape "VM.Standard.E2.1.Micro" \
+            --display-name "Binance-Bot-Micro" \
+            --image-id "${{ secrets.IMAGE_ID }}" \
+            --subnet-id "${{ secrets.SUBNET_ID }}" \
+            --assign-public-ip true
