@@ -30,7 +30,6 @@ jobs:
             fi
           done
 
-          # Either full OCI_CONFIG or OCI_KEY_FILE must exist
           if [ -z "${OCI_CONFIG:-}" ] && [ -z "${OCI_KEY_FILE:-}" ]; then
             echo "Missing secret: OCI_CONFIG or OCI_KEY_FILE"
             missing=1
@@ -57,10 +56,8 @@ jobs:
           mkdir -p ~/.oci
 
           if [ -n "${OCI_CONFIG:-}" ]; then
-            # Preferred: full config from secret
             echo "$OCI_CONFIG" | tr -d '\r' > ~/.oci/config
 
-            # If key_file is referenced, ensure key exists when provided.
             if grep -q '^key_file=' ~/.oci/config && [ -n "${OCI_KEY_FILE:-}" ]; then
               key_path=$(grep '^key_file=' ~/.oci/config | head -n1 | cut -d'=' -f2-)
               mkdir -p "$(dirname "$key_path")"
@@ -68,18 +65,16 @@ jobs:
               chmod 600 "$key_path"
             fi
           else
-            # Backward-compatible: build config from hardcoded tenancy/user + key secret
             echo "$OCI_KEY_FILE" | tr -d '\r' > ~/.oci/key.pem
             chmod 600 ~/.oci/key.pem
 
-            cat > ~/.oci/config <<'EOF'
-            [DEFAULT]
-            user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
-            fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06
-            tenancy=ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq
-            region=eu-frankfurt-1
-            key_file=/home/runner/.oci/key.pem
-            EOF
+            printf '%s\n' \
+              '[DEFAULT]' \
+              'user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq' \
+              'fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06' \
+              'tenancy=ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq' \
+              'region=eu-frankfurt-1' \
+              'key_file=/home/runner/.oci/key.pem' > ~/.oci/config
           fi
 
           chmod 600 ~/.oci/config
@@ -115,7 +110,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Read tenancy from active OCI config
           TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
           if [ -z "$TENANCY_OCID" ]; then
             echo "Could not determine tenancy OCID from ~/.oci/config"
