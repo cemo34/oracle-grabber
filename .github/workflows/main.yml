@@ -31,38 +31,63 @@ jobs:
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
-          normalize() {
-            # Trim whitespace/newlines and remove wrapping single or double quotes.
-            printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+          trim_quotes_spaces() {
+            printf '%s' "$1" \
+              | tr -d '\r' \
+              | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                    -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
           }
 
-          user_ocid=$(normalize "${OCI_USER_OCID:-}")
-          tenancy_ocid=$(normalize "${OCI_TENANCY_OCID:-}")
-          region=$(normalize "${OCI_REGION:-}")
-          fingerprint=$(normalize "${OCI_FINGERPRINT:-}")
-          private_key=$(printf '%s' "${OCI_PRIVATE_KEY:-}" | tr -d '\r')
+          extract_ocid() {
+            # Accept raw ocid, or key=value, or quoted text that contains an OCID.
+            printf '%s' "$1" | tr -d '\r' | grep -Eo "ocid1\.$2\.[A-Za-z0-9._:-]+" | head -n 1 || true
+          }
 
-          # Normalize fingerprint for validation/write.
-          fingerprint=$(printf '%s' "$fingerprint" | tr 'A-F' 'a-f')
+          extract_fingerprint() {
+            printf '%s' "$1" | tr -d '\r' | grep -Eio '([0-9a-f]{2}:){15}[0-9a-f]{2}' | head -n 1 || true
+          }
 
-          if ! printf '%s' "$tenancy_ocid" | grep -Eq '^ocid1\.tenancy\..+'; then
-            echo "Invalid OCI_TENANCY_OCID secret format. Expected an OCID like ocid1.tenancy...."
+          extract_region() {
+            # Typical OCI region pattern: eu-frankfurt-1
+            printf '%s' "$1" | tr -d '\r' | grep -Eio '[a-z]{2}-[a-z0-9-]+-[0-9]+' | head -n 1 || true
+          }
+
+          raw_user=$(trim_quotes_spaces "${OCI_USER_OCID:-}")
+          raw_tenancy=$(trim_quotes_spaces "${OCI_TENANCY_OCID:-}")
+          raw_region=$(trim_quotes_spaces "${OCI_REGION:-}")
+          raw_fingerprint=$(trim_quotes_spaces "${OCI_FINGERPRINT:-}")
+          raw_private_key=$(printf '%s' "${OCI_PRIVATE_KEY:-}" | tr -d '\r')
+
+          user_ocid=$(extract_ocid "$raw_user" user)
+          tenancy_ocid=$(extract_ocid "$raw_tenancy" tenancy)
+          region=$(extract_region "$raw_region")
+          fingerprint=$(extract_fingerprint "$raw_fingerprint")
+
+          # Support private key provided as a single line with literal \n sequences.
+          private_key=$(printf '%s' "$raw_private_key")
+          if printf '%s' "$private_key" | grep -q '\\n'; then
+            private_key=$(printf '%b' "$private_key")
+          fi
+
+          if [ -z "$tenancy_ocid" ]; then
+            echo "Invalid OCI_TENANCY_OCID secret. Must contain ocid1.tenancy...."
             exit 1
           fi
 
-          if ! printf '%s' "$user_ocid" | grep -Eq '^ocid1\.user\..+'; then
-            echo "Invalid OCI_USER_OCID secret format. Expected an OCID like ocid1.user...."
+          if [ -z "$user_ocid" ]; then
+            echo "Invalid OCI_USER_OCID secret. Must contain ocid1.user...."
             exit 1
           fi
 
-          if ! printf '%s' "$fingerprint" | grep -Eq '^([0-9a-f]{2}:){15}[0-9a-f]{2}$'; then
-            echo "Invalid OCI_FINGERPRINT format. Expected 16 hex byte pairs separated by ':'"
+          if [ -z "$fingerprint" ]; then
+            echo "Invalid OCI_FINGERPRINT secret. Must contain fingerprint like aa:bb:..."
             exit 1
           fi
 
           if [ -z "$region" ]; then
-            echo "OCI_REGION is empty."
+            echo "Invalid OCI_REGION secret. Must contain region like eu-frankfurt-1."
             exit 1
           fi
 
@@ -85,6 +110,8 @@ jobs:
           CFG
 
           chmod 600 ~/.oci/config
+          oci setup repair-file-permissions --file ~/.oci/config >/dev/null 2>&1 || true
+          oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem >/dev/null 2>&1 || true
 
           # Fast sanity check before main launch logic.
           oci iam region list --output table >/dev/null
@@ -92,6 +119,7 @@ jobs:
       - name: Launch ARM Instance If None Exists
         run: |
           set -euo pipefail
+          export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
           TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
           if [ -z "$TENANCY_OCID" ]; then
