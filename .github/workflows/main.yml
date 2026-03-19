@@ -1,4 +1,4 @@
-name: Oracle ARM Hunter
+name: Oracle ARM/AMD Hunter
 
 on:
   schedule:
@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  hunt-arm:
+  hunt-free-tier:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     environment: OCI_CONFIG
 
     steps:
@@ -16,14 +16,12 @@ jobs:
         env:
           OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
           OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
-          IMAGE_ID: ${{ secrets.IMAGE_ID }}
           SUBNET_ID: ${{ secrets.SUBNET_ID }}
           COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
         run: |
           set -euo pipefail
           missing=0
 
-          # IMAGE_ID is optional now (auto discovery is supported)
           for key in SUBNET_ID COMPARTMENT_ID; do
             if [ -z "${!key:-}" ]; then
               echo "Missing secret: $key"
@@ -80,62 +78,7 @@ jobs:
 
           chmod 600 ~/.oci/config
 
-      - name: Resolve and validate ARM IMAGE_ID
-        env:
-          IMAGE_ID: ${{ secrets.IMAGE_ID }}
-          SUPPRESS_LABEL_WARNING: True
-        run: |
-          set -euo pipefail
-
-          TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
-          if [ -z "$TENANCY_OCID" ]; then
-            echo "Could not determine tenancy OCID from ~/.oci/config"
-            exit 1
-          fi
-
-          INPUT_IMAGE_ID=$(printf '%s' "${IMAGE_ID:-}" | tr -d '\r' | xargs || true)
-          RESOLVED_IMAGE_ID=""
-
-          if [ -n "$INPUT_IMAGE_ID" ] && [[ "$INPUT_IMAGE_ID" =~ ^ocid1\.image\.oc1\..+ ]]; then
-            set +e
-            oci compute image get --image-id "$INPUT_IMAGE_ID" >/tmp/image_check.json 2>/tmp/image_check.err
-            code=$?
-            set -e
-            if [ "$code" -eq 0 ]; then
-              RESOLVED_IMAGE_ID="$INPUT_IMAGE_ID"
-              echo "Provided IMAGE_ID is valid."
-            else
-              echo "Provided IMAGE_ID is invalid/unreachable, falling back to auto-discovery."
-              cat /tmp/image_check.err || true
-            fi
-          else
-            if [ -n "$INPUT_IMAGE_ID" ]; then
-              echo "Provided IMAGE_ID format invalid, auto-discovery will be used: $INPUT_IMAGE_ID"
-            else
-              echo "IMAGE_ID not set, auto-discovery will be used."
-            fi
-          fi
-
-          if [ -z "$RESOLVED_IMAGE_ID" ]; then
-            echo "Discovering latest AVAILABLE image compatible with VM.Standard.A1.Flex..."
-            RESOLVED_IMAGE_ID=$(oci compute image list \
-              --compartment-id "$TENANCY_OCID" \
-              --all \
-              --shape "VM.Standard.A1.Flex" \
-              --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE'], &\"time-created\"))[0].id" \
-              --raw-output)
-          fi
-
-          if [ -z "$RESOLVED_IMAGE_ID" ] || [ "$RESOLVED_IMAGE_ID" = "null" ]; then
-            echo "Could not resolve a valid ARM image OCID automatically."
-            exit 1
-          fi
-
-          oci compute image get --image-id "$RESOLVED_IMAGE_ID" >/dev/null
-          echo "RESOLVED_IMAGE_ID=$RESOLVED_IMAGE_ID" >> "$GITHUB_ENV"
-          echo "Using image: ${RESOLVED_IMAGE_ID:0:42}..."
-
-      - name: Try create ARM instance in all ADs
+      - name: Discover Ubuntu 24 image and launch ARM+AMD Free
         env:
           SUBNET_ID: ${{ secrets.SUBNET_ID }}
           COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
@@ -149,12 +92,6 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${RESOLVED_IMAGE_ID:-}" ]; then
-            echo "RESOLVED_IMAGE_ID is missing."
-            exit 1
-          fi
-
-          echo "Listing availability domains..."
           AD_LIST=$(oci iam availability-domain list \
             --compartment-id "$TENANCY_OCID" \
             --query 'data[].name' \
@@ -168,50 +105,124 @@ jobs:
           echo "AD candidates:"
           echo "$AD_LIST"
 
-          success=0
-          while IFS= read -r ad; do
-            [ -z "$ad" ] && continue
-            echo "Trying launch in AD: $ad"
+          # target|shape|shape_config|display_name
+          TARGETS=$(cat <<'TXT'
+          arm|VM.Standard.A1.Flex|{"ocpus": 4, "memoryInGBs": 24}|Binance-Bot-ARM-Ubuntu24
+          amd|VM.Standard.E2.1.Micro||Binance-Bot-AMD-Free-Ubuntu24
+          TXT
+          )
 
+          launched=0
+          image_missing_count=0
+
+          while IFS='|' read -r target shape shape_cfg display_name; do
+            [ -z "$target" ] && continue
+            echo "=== Target: $target / Shape: $shape ==="
+
+            # 1) Strict search: Ubuntu 24.04 + shape compatible
+            image_id=$(oci compute image list \
+              --compartment-id "$TENANCY_OCID" \
+              --all \
+              --shape "$shape" \
+              --operating-system "Canonical Ubuntu" \
+              --operating-system-version "24.04" \
+              --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE'], &\"time-created\"))[0].id" \
+              --raw-output)
+
+            # 2) Fallback search: display-name contains Ubuntu and 24.04
+            if [ -z "$image_id" ] || [ "$image_id" = "null" ]; then
+              echo "Strict Ubuntu 24.04 image not found, trying fallback filter..."
+              image_id=$(oci compute image list \
+                --compartment-id "$TENANCY_OCID" \
+                --all \
+                --shape "$shape" \
+                --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE' && contains(\"display-name\", 'Ubuntu') && contains(\"display-name\", '24.04')], &\"time-created\"))[0].id" \
+                --raw-output)
+            fi
+
+            if [ -z "$image_id" ] || [ "$image_id" = "null" ]; then
+              echo "No Ubuntu 24 image found for shape: $shape (target=$target)."
+              image_missing_count=$((image_missing_count + 1))
+              continue
+            fi
+
+            echo "Resolved image for $target: ${image_id:0:42}..."
+
+            # Sanity validation
             set +e
-            output=$(oci compute instance launch \
-              --availability-domain "$ad" \
-              --compartment-id "$COMPARTMENT_ID" \
-              --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
-              --display-name "Binance-Bot-ARM" \
-              --source-details "{\"image_id\": \"$RESOLVED_IMAGE_ID\", \"source_type\": \"image\"}" \
-              --subnet-id "$SUBNET_ID" \
-              --assign-public-ip true 2>&1)
-            code=$?
+            oci compute image get --image-id "$image_id" >/tmp/image_get_${target}.json 2>/tmp/image_get_${target}.err
+            img_code=$?
             set -e
+            if [ "$img_code" -ne 0 ]; then
+              echo "Resolved image invalid for $target:"
+              cat /tmp/image_get_${target}.err || true
+              image_missing_count=$((image_missing_count + 1))
+              continue
+            fi
 
-            if [ "$code" -eq 0 ]; then
-              echo "Instance launch SUCCESS in $ad"
+            # Try all ADs for this target
+            target_launched=0
+            while IFS= read -r ad; do
+              [ -z "$ad" ] && continue
+              echo "Trying $target in AD: $ad"
+
+              cmd=(oci compute instance launch
+                --availability-domain "$ad"
+                --compartment-id "$COMPARTMENT_ID"
+                --shape "$shape"
+                --display-name "$display_name"
+                --source-details "{\"image_id\": \"$image_id\", \"source_type\": \"image\"}"
+                --subnet-id "$SUBNET_ID"
+                --assign-public-ip true)
+
+              if [ -n "$shape_cfg" ]; then
+                cmd+=(--shape-config "$shape_cfg")
+              fi
+
+              set +e
+              output=$("${cmd[@]}" 2>&1)
+              code=$?
+              set -e
+
+              if [ "$code" -eq 0 ]; then
+                echo "Launch SUCCESS ($target, $ad)"
+                echo "$output"
+                launched=1
+                target_launched=1
+                break
+              fi
+
+              echo "Launch failed ($target, $ad):"
               echo "$output"
-              success=1
+
+              if echo "$output" | grep -qiE 'OutOfHostCapacity|Out of host capacity|Out of capacity'; then
+                echo "Capacity yok, sonraki AD denenecek."
+                continue
+              fi
+
+              if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests|ServiceError'; then
+                echo "Geçici/limit kaynaklı hata, sonraki AD denenecek."
+                continue
+              fi
+
+              echo "Beklenmeyen hata nedeniyle workflow fail ediliyor."
+              exit "$code"
+            done <<< "$AD_LIST"
+
+            if [ "$target_launched" -eq 1 ]; then
+              # Bir hedefte başarılı olunca diğerini denemeye gerek yok
               break
             fi
+          done <<< "$TARGETS"
 
-            echo "Launch failed in $ad (exit=$code)."
-            echo "$output"
-
-            if echo "$output" | grep -qiE 'OutOfHostCapacity|Out of host capacity|Out of capacity'; then
-              echo "Capacity yok, sonraki AD denenecek."
-              continue
-            fi
-
-            if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests|ServiceError'; then
-              echo "Geçici/limit kaynaklı hata, sonraki AD denenecek."
-              continue
-            fi
-
-            echo "Beklenmeyen hata nedeniyle workflow fail ediliyor."
-            exit "$code"
-          done <<< "$AD_LIST"
-
-          if [ "$success" -eq 1 ]; then
+          if [ "$launched" -eq 1 ]; then
+            echo "At least one target launched successfully."
             exit 0
+          fi
+
+          if [ "$image_missing_count" -ge 2 ]; then
+            echo "Neither ARM nor AMD target could find Ubuntu 24 image. Check region/image availability."
+            exit 1
           fi
 
           echo "No capacity now. Workflow başarılı bitti, 5 dk sonra tekrar denenecek."
