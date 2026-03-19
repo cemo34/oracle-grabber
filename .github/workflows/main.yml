@@ -13,13 +13,24 @@ jobs:
           bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
           echo "/home/runner/bin" >> $GITHUB_PATH
 
-      - name: Configure OCI
+      - name: Create OCI Config Manually
         run: |
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          # ANAHTARI OLUŞTUR
           echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
-          chmod 600 ~/.oci/config
           chmod 600 ~/.oci/key.pem
+          
+          # CONFIG DOSYASINI ELİMİZLE YAZIYORUZ (HATA ŞANSI YOK)
+          cat <<EOF > ~/.oci/config
+          [DEFAULT]
+          user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
+          fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06
+          tenancy=ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq
+          region=eu-frankfurt-1
+          key_file=/home/runner/.oci/key.pem
+          EOF
+          
+          chmod 600 ~/.oci/config
 
       - name: Try Create ARM Instance
         env:
