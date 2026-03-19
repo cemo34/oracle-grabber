@@ -92,10 +92,8 @@ jobs:
             exit 1
           fi
 
-          AD_LIST=$(oci iam availability-domain list \
-            --compartment-id "$TENANCY_OCID" \
-            --query 'data[].name' \
-            --raw-output)
+          AD_JSON=$(oci iam availability-domain list --compartment-id "$TENANCY_OCID" --output json)
+          AD_LIST=$(printf '%s' "$AD_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('\\n'.join([x.get('name','') for x in d.get('data',[]) if x.get('name')]))")
 
           if [ -z "$AD_LIST" ]; then
             echo "Could not fetch availability domains."
@@ -198,7 +196,7 @@ jobs:
                 continue
               fi
 
-              if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests|ServiceError'; then
+              if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests'; then
                 echo "Geçici/limit kaynaklı hata, sonraki AD denenecek."
                 continue
               fi
