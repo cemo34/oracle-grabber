@@ -9,10 +9,12 @@ jobs:
   hunt-arm:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: OCI_CONFIG
 
     steps:
       - name: Validate required secrets
         env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
           OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
           IMAGE_ID: ${{ secrets.IMAGE_ID }}
           SUBNET_ID: ${{ secrets.SUBNET_ID }}
@@ -20,14 +22,22 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for key in OCI_KEY_FILE IMAGE_ID SUBNET_ID COMPARTMENT_ID; do
+
+          for key in IMAGE_ID SUBNET_ID COMPARTMENT_ID; do
             if [ -z "${!key:-}" ]; then
               echo "Missing secret: $key"
               missing=1
             fi
           done
+
+          # Either full OCI_CONFIG or OCI_KEY_FILE must exist
+          if [ -z "${OCI_CONFIG:-}" ] && [ -z "${OCI_KEY_FILE:-}" ]; then
+            echo "Missing secret: OCI_CONFIG or OCI_KEY_FILE"
+            missing=1
+          fi
+
           if [ "$missing" -ne 0 ]; then
-            echo "Required secrets are missing. Add them in repository secrets and rerun."
+            echo "Required secrets are missing. Add them in Environment secrets (OCI_CONFIG) and rerun."
             exit 1
           fi
 
@@ -40,32 +50,77 @@ jobs:
 
       - name: Create OCI config
         env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
           OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
         run: |
           set -euo pipefail
           mkdir -p ~/.oci
-          echo "$OCI_KEY_FILE" | tr -d '\r' > ~/.oci/key.pem
-          chmod 600 ~/.oci/key.pem
 
-          cat > ~/.oci/config <<'EOF'
-          [DEFAULT]
-          user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
-          fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06
-          tenancy=ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq
-          region=eu-frankfurt-1
-          key_file=/home/runner/.oci/key.pem
-          EOF
+          if [ -n "${OCI_CONFIG:-}" ]; then
+            # Preferred: full config from secret
+            echo "$OCI_CONFIG" | tr -d '\r' > ~/.oci/config
+
+            # If key_file is referenced, ensure key exists when provided.
+            if grep -q '^key_file=' ~/.oci/config && [ -n "${OCI_KEY_FILE:-}" ]; then
+              key_path=$(grep '^key_file=' ~/.oci/config | head -n1 | cut -d'=' -f2-)
+              mkdir -p "$(dirname "$key_path")"
+              echo "$OCI_KEY_FILE" | tr -d '\r' > "$key_path"
+              chmod 600 "$key_path"
+            fi
+          else
+            # Backward-compatible: build config from hardcoded tenancy/user + key secret
+            echo "$OCI_KEY_FILE" | tr -d '\r' > ~/.oci/key.pem
+            chmod 600 ~/.oci/key.pem
+
+            cat > ~/.oci/config <<'EOF'
+            [DEFAULT]
+            user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
+            fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06
+            tenancy=ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq
+            region=eu-frankfurt-1
+            key_file=/home/runner/.oci/key.pem
+            EOF
+          fi
 
           chmod 600 ~/.oci/config
+
+      - name: Validate IMAGE_ID exists and is available
+        env:
+          IMAGE_ID: ${{ secrets.IMAGE_ID }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$IMAGE_ID" =~ ^ocid1\.image\.oc1\..+ ]]; then
+            echo "IMAGE_ID format looks invalid: $IMAGE_ID"
+            exit 1
+          fi
+
+          set +e
+          image_json=$(oci compute image get --image-id "$IMAGE_ID" 2>&1)
+          code=$?
+          set -e
+
+          if [ "$code" -ne 0 ]; then
+            echo "IMAGE_ID could not be fetched. Check region/compartment/image OCID."
+            echo "$image_json"
+            exit "$code"
+          fi
+
+          echo "IMAGE_ID is valid."
 
       - name: Try create ARM instance in all ADs
         env:
           IMAGE_ID: ${{ secrets.IMAGE_ID }}
           SUBNET_ID: ${{ secrets.SUBNET_ID }}
           COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
-          TENANCY_OCID: ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq
         run: |
           set -euo pipefail
+
+          # Read tenancy from active OCI config
+          TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
+          if [ -z "$TENANCY_OCID" ]; then
+            echo "Could not determine tenancy OCID from ~/.oci/config"
+            exit 1
+          fi
 
           echo "Listing availability domains..."
           AD_LIST=$(oci iam availability-domain list \
