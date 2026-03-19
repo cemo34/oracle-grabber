@@ -12,6 +12,7 @@ jobs:
     env:
       SUBNET_ID: ${{ secrets.SUBNET_ID }}
       COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+      VM_SSH_PUBLIC_KEY: ${{ secrets.VM_SSH_PUBLIC_KEY }}
       SUPPRESS_LABEL_WARNING: true
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
 
@@ -137,6 +138,29 @@ jobs:
           set -euo pipefail
           export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
+          if [ -z "${VM_SSH_PUBLIC_KEY:-}" ]; then
+            echo "VM_SSH_PUBLIC_KEY secret is missing. Add your public key to environment secret VM_SSH_PUBLIC_KEY."
+            exit 1
+          fi
+
+          SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$VM_SSH_PUBLIC_KEY" | tr -d '\r')
+          if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -q '\\n'; then
+            SSH_PUBLIC_KEY_CLEAN=$(printf '%b' "$SSH_PUBLIC_KEY_CLEAN")
+          fi
+          SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | tr -d '\n')
+
+          if ! printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
+            echo "VM_SSH_PUBLIC_KEY format looks invalid. Expected OpenSSH public key starting with ssh-ed25519/ssh-rsa/ecdsa-sha2-nistp256."
+            exit 1
+          fi
+
+          METADATA_JSON=$(python3 - <<'PY'
+import json
+import os
+print(json.dumps({"ssh_authorized_keys": os.environ["SSH_PUBLIC_KEY_CLEAN"]}))
+PY
+)
+
           TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
           if [ -z "$TENANCY_OCID" ]; then
             echo "Could not determine tenancy OCID from ~/.oci/config"
@@ -216,6 +240,7 @@ jobs:
               --shape "$shape"
               --display-name "$display_name"
               --source-details "{\"image_id\": \"$image_id\", \"source_type\": \"image\"}"
+              --metadata "$METADATA_JSON"
               --subnet-id "$SUBNET_ID"
               --assign-public-ip true
               --shape-config "$shape_cfg")
