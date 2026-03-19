@@ -37,12 +37,11 @@ jobs:
 
           mkdir -p ~/.oci
 
-          # Preferred mode: use existing full OCI config + key secrets from environment.
+          # Preferred mode: full OCI config + key secrets.
           if [ -n "${OCI_CONFIG_SECRET:-}" ] && [ -n "${OCI_KEY_FILE_SECRET:-}" ]; then
             cfg_content=$(printf '%s' "$OCI_CONFIG_SECRET" | tr -d '\r')
             key_content=$(printf '%s' "$OCI_KEY_FILE_SECRET" | tr -d '\r')
 
-            # Support secrets stored as single line with literal \n.
             if printf '%s' "$cfg_content" | grep -q '\\n'; then
               cfg_content=$(printf '%b' "$cfg_content")
             fi
@@ -53,7 +52,6 @@ jobs:
             printf '%s\n' "$cfg_content" > ~/.oci/config
             printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
 
-            # Force key_file path to the local runner path to avoid mismatch in pasted config.
             if grep -q '^key_file=' ~/.oci/config; then
               sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
             else
@@ -118,21 +116,20 @@ jobs:
             fi
 
             printf '%s\n' "$private_key" > ~/.oci/oci_api_key.pem
-            cat > ~/.oci/config <<CFG
-            [DEFAULT]
-            user=$user_ocid
-            fingerprint=$fingerprint
-            tenancy=$tenancy_ocid
-            region=$region
-            key_file=~/.oci/oci_api_key.pem
-            CFG
+            {
+              printf '%s\n' '[DEFAULT]'
+              printf 'user=%s\n' "$user_ocid"
+              printf 'fingerprint=%s\n' "$fingerprint"
+              printf 'tenancy=%s\n' "$tenancy_ocid"
+              printf 'region=%s\n' "$region"
+              printf '%s\n' 'key_file=~/.oci/oci_api_key.pem'
+            } > ~/.oci/config
           fi
 
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
           oci setup repair-file-permissions --file ~/.oci/config >/dev/null 2>&1 || true
           oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem >/dev/null 2>&1 || true
 
-          # Fast sanity check before main launch logic.
           oci iam region list --output table >/dev/null
 
       - name: Launch ARM Instance If None Exists
