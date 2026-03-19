@@ -16,11 +16,9 @@ jobs:
       - name: Create OCI Config Manually
         run: |
           mkdir -p ~/.oci
-          # ANAHTARI OLUŞTUR
           echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
           chmod 600 ~/.oci/key.pem
           
-          # CONFIG DOSYASINI ELİMİZLE YAZIYORUZ (HATA ŞANSI YOK)
           cat <<EOF > ~/.oci/config
           [DEFAULT]
           user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
@@ -37,6 +35,7 @@ jobs:
           MY_IMAGE_ID: ${{ secrets.IMAGE_ID }}
           MY_SUBNET_ID: ${{ secrets.SUBNET_ID }}
           MY_COMP_ID: ${{ secrets.COMPARTMENT_ID }}
+          SUPPRESS_LABEL_WARNING: True # O sığır uyarıyı kapatır
         run: |
           oci compute instance launch \
             --availability-domain "UvXp:EU-FRANKFURT-1-AD-1" \
