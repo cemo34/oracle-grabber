@@ -1,4 +1,26 @@
-- name: Try Create ARM Instance
+name: Oracle ARM Hunter
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  hunt-arm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "/home/runner/bin" >> $GITHUB_PATH
+
+      - name: Configure OCI
+        run: |
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CONFIG }}" > ~/.oci/config
+          echo "${{ secrets.OCI_KEY_FILE }}" > ~/.oci/key.pem
+          sed -i 's|key_file=.*|key_file=/home/runner/.oci/key.pem|' ~/.oci/config
+
+      - name: Try Create ARM Instance
         env:
           MY_IMAGE_ID: ${{ secrets.IMAGE_ID }}
           MY_SUBNET_ID: ${{ secrets.SUBNET_ID }}
