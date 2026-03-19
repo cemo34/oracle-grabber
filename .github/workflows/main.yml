@@ -106,11 +106,9 @@ jobs:
           echo "$AD_LIST"
 
           # target|shape|shape_config|display_name
-          TARGETS=$(cat <<'TXT'
-          arm|VM.Standard.A1.Flex|{"ocpus": 4, "memoryInGBs": 24}|Binance-Bot-ARM-Ubuntu24
-          amd|VM.Standard.E2.1.Micro||Binance-Bot-AMD-Free-Ubuntu24
-          TXT
-          )
+          TARGETS=$(printf '%s\n' \
+            'arm|VM.Standard.A1.Flex|{"ocpus": 4, "memoryInGBs": 24}|Binance-Bot-ARM-Ubuntu24' \
+            'amd|VM.Standard.E2.1.Micro||Binance-Bot-AMD-Free-Ubuntu24')
 
           launched=0
           image_missing_count=0
