@@ -245,6 +245,11 @@ jobs:
               continue
             fi
 
+            if echo "$output" | grep -qiE 'RequestException|connection to endpoint timed out|timed out|Connection timed out'; then
+              echo "Gecici ag/OCI timeout hatasi, sonraki AD denenecek."
+              continue
+            fi
+
             echo "Beklenmeyen hata nedeniyle workflow fail ediliyor."
             exit "$code"
           done <<< "$AD_LIST"
@@ -254,5 +259,5 @@ jobs:
             exit 0
           fi
 
-          echo "No ARM capacity now. Workflow basarili bitti, 5 dk sonra tekrar denenecek."
+          echo "No ARM capacity now (or transient OCI timeouts). Workflow basarili bitti, 5 dk sonra tekrar denenecek."
           exit 0
