@@ -1,88 +1,52 @@
-name: Oracle ARM/AMD Hunter
+name: Oracle Capacity Hunter
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
-  hunt-free-tier:
+  hunt-capacity:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    environment: OCI_CONFIG
+    environment: Oracle
+    env:
+      SUBNET_ID: ${{ secrets.SUBNET_ID }}
+      COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+      SUPPRESS_LABEL_WARNING: true
 
     steps:
-      - name: Validate required secrets
-        env:
-          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
-          OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
-          SUBNET_ID: ${{ secrets.SUBNET_ID }}
-          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
-        run: |
-          set -euo pipefail
-          missing=0
-
-          for key in SUBNET_ID COMPARTMENT_ID; do
-            if [ -z "${!key:-}" ]; then
-              echo "Missing secret: $key"
-              missing=1
-            fi
-          done
-
-          if [ -z "${OCI_CONFIG:-}" ] && [ -z "${OCI_KEY_FILE:-}" ]; then
-            echo "Missing secret: OCI_CONFIG or OCI_KEY_FILE"
-            missing=1
-          fi
-
-          if [ "$missing" -ne 0 ]; then
-            echo "Required secrets are missing. Add them in Environment secrets (OCI_CONFIG) and rerun."
-            exit 1
-          fi
-
       - name: Install OCI CLI
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
-          python3 -m pip install --upgrade oci-cli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          python3 -m pip install oci-cli
 
-      - name: Create OCI config
+      - name: Configure OCI CLI
         env:
-          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
-          OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+
           mkdir -p ~/.oci
+          printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
 
-          if [ -n "${OCI_CONFIG:-}" ]; then
-            echo "$OCI_CONFIG" | tr -d '\r' > ~/.oci/config
+          cat > ~/.oci/config <<CFG
+          [DEFAULT]
+          user=$OCI_USER_OCID
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY_OCID
+          region=$OCI_REGION
+          key_file=~/.oci/oci_api_key.pem
+          CFG
 
-            if grep -q '^key_file=' ~/.oci/config && [ -n "${OCI_KEY_FILE:-}" ]; then
-              key_path=$(grep '^key_file=' ~/.oci/config | head -n1 | cut -d'=' -f2-)
-              mkdir -p "$(dirname "$key_path")"
-              echo "$OCI_KEY_FILE" | tr -d '\r' > "$key_path"
-              chmod 600 "$key_path"
-            fi
-          else
-            echo "$OCI_KEY_FILE" | tr -d '\r' > ~/.oci/key.pem
-            chmod 600 ~/.oci/key.pem
+          oci iam region list --output table >/dev/null
 
-            printf '%s\n' \
-              '[DEFAULT]' \
-              'user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq' \
-              'fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06' \
-              'tenancy=ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq' \
-              'region=eu-frankfurt-1' \
-              'key_file=/home/runner/.oci/key.pem' > ~/.oci/config
-          fi
-
-          chmod 600 ~/.oci/config
-
-      - name: Discover Ubuntu 24 image and launch ARM+AMD Free
-        env:
-          SUBNET_ID: ${{ secrets.SUBNET_ID }}
-          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
-          SUPPRESS_LABEL_WARNING: True
+      - name: Launch Oracle Instance If None Exists
         run: |
           set -euo pipefail
 
@@ -90,6 +54,15 @@ jobs:
           if [ -z "$TENANCY_OCID" ]; then
             echo "Could not determine tenancy OCID from ~/.oci/config"
             exit 1
+          fi
+
+          # Prevent duplicate machine creation: if a bot instance already exists and is not terminated, skip launch.
+          EXISTING_JSON=$(oci compute instance list --compartment-id "$COMPARTMENT_ID" --all --output json)
+          existing_count=$(printf '%s' "$EXISTING_JSON" | python3 -c "import json,sys; names={'Binance-Bot-ARM-Ubuntu24','Binance-Bot-AMD-Free-Ubuntu24'}; active={'PROVISIONING','STARTING','RUNNING','STOPPING','STOPPED'}; d=json.load(sys.stdin).get('data',[]); print(sum(1 for i in d if i.get('display-name') in names and i.get('lifecycle-state') in active))")
+
+          if [ "${existing_count:-0}" -gt 0 ]; then
+            echo "Existing bot instance detected (${existing_count}). Skipping new launch to avoid duplicates."
+            exit 0
           fi
 
           AD_JSON=$(oci iam availability-domain list --compartment-id "$TENANCY_OCID" --output json)
@@ -197,7 +170,7 @@ jobs:
               fi
 
               if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests'; then
-                echo "Geçici/limit kaynaklı hata, sonraki AD denenecek."
+                echo "Gecici/limit kaynakli hata, sonraki AD denenecek."
                 continue
               fi
 
@@ -206,7 +179,7 @@ jobs:
             done <<< "$AD_LIST"
 
             if [ "$target_launched" -eq 1 ]; then
-              # Bir hedefte başarılı olunca diğerini denemeye gerek yok
+              # Bir hedefte basarili olunca digerini denemeye gerek yok
               break
             fi
           done <<< "$TARGETS"
@@ -221,5 +194,5 @@ jobs:
             exit 1
           fi
 
-          echo "No capacity now. Workflow başarılı bitti, 5 dk sonra tekrar denenecek."
+          echo "No capacity now. Workflow basarili bitti, 5 dk sonra tekrar denenecek."
           exit 0
