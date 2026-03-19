@@ -1,10 +1,26 @@
-- name: Create OCI Config Manually
+name: Oracle ARM Hunter
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Her 5 dakikada bir Frankfurt kapısını zorlar
+  workflow_dispatch: # İstediğinde manuel başlatma butonu
+
+jobs:
+  hunt-arm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "/home/runner/bin" >> $GITHUB_PATH
+
+      - name: Create OCI Config Manually
         run: |
           mkdir -p ~/.oci
-          # Anahtarı temizleyerek oluştur (Gizli Windows karakterlerini siler)
+          # Anahtarı temizleyerek (Windows satır sonlarını silerek) oluşturur
           echo "${{ secrets.OCI_KEY_FILE }}" | tr -d '\r' > ~/.oci/key.pem
           chmod 600 ~/.oci/key.pem
           
+          # Senin verdiğin güncel ID'lerle config dosyasını yazar
           cat <<EOF > ~/.oci/config
           [DEFAULT]
           user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
@@ -15,3 +31,20 @@
           EOF
           
           chmod 600 ~/.oci/config
+
+      - name: Try Create ARM Instance
+        env:
+          MY_IMAGE_ID: ${{ secrets.IMAGE_ID }}
+          MY_SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          MY_COMP_ID: ${{ secrets.COMPARTMENT_ID }}
+          SUPPRESS_LABEL_WARNING: True
+        run: |
+          oci compute instance launch \
+            --availability-domain "UvXp:EU-FRANKFURT-1-AD-1" \
+            --compartment-id "$MY_COMP_ID" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
+            --display-name "Binance-Bot-ARM" \
+            --source-details "{\"image_id\": \"$MY_IMAGE_ID\", \"source_type\": \"image\"}" \
+            --subnet-id "$MY_SUBNET_ID" \
+            --assign-public-ip true
