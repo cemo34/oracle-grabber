@@ -1,27 +1,53 @@
 name: Oracle ARM Hunter
+
 on:
   schedule:
-    - cron: '*/5 * * * *' # Her 5 dakikada bir Frankfurt kapısını zorlar
-  workflow_dispatch: # İstediğinde manuel başlatma butonu
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   hunt-arm:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
+      - name: Validate required secrets
+        env:
+          OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
+          IMAGE_ID: ${{ secrets.IMAGE_ID }}
+          SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in OCI_KEY_FILE IMAGE_ID SUBNET_ID COMPARTMENT_ID; do
+            if [ -z "${!key:-}" ]; then
+              echo "Missing secret: $key"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Required secrets are missing. Add them in repository secrets and rerun."
+            exit 1
+          fi
+
       - name: Install OCI CLI
         run: |
-          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
-          echo "/home/runner/bin" >> $GITHUB_PATH
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade oci-cli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Create OCI Config Manually
+      - name: Create OCI config
+        env:
+          OCI_KEY_FILE: ${{ secrets.OCI_KEY_FILE }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.oci
-          # Anahtarı temizleyerek (Windows satır sonlarını silerek) oluşturur
-          echo "${{ secrets.OCI_KEY_FILE }}" | tr -d '\r' > ~/.oci/key.pem
+          echo "$OCI_KEY_FILE" | tr -d '\r' > ~/.oci/key.pem
           chmod 600 ~/.oci/key.pem
-          
-          # Senin verdiğin güncel ID'lerle config dosyasını yazar
-          cat <<EOF > ~/.oci/config
+
+          cat > ~/.oci/config <<'EOF'
           [DEFAULT]
           user=ocid1.user.oc1..aaaaaaaajba25qo74ktbgr3g7vwphgmjrvezgvlh3z3aydbstnu4igvwdwwq
           fingerprint=5f:ba:41:89:f3:84:42:19:81:23:76:67:88:b1:a3:06
@@ -29,22 +55,77 @@ jobs:
           region=eu-frankfurt-1
           key_file=/home/runner/.oci/key.pem
           EOF
-          
+
           chmod 600 ~/.oci/config
 
-      - name: Try Create ARM Instance
+      - name: Try create ARM instance in all ADs
         env:
-          MY_IMAGE_ID: ${{ secrets.IMAGE_ID }}
-          MY_SUBNET_ID: ${{ secrets.SUBNET_ID }}
-          MY_COMP_ID: ${{ secrets.COMPARTMENT_ID }}
-          SUPPRESS_LABEL_WARNING: True
+          IMAGE_ID: ${{ secrets.IMAGE_ID }}
+          SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+          TENANCY_OCID: ocid1.tenancy.oc1..aaaaaaaa4yolzgxkwj5q4ppjo3lfubvsftiy45m43yudwe2jgkybpjrjrphq
         run: |
-          oci compute instance launch \
-            --availability-domain "UvXp:EU-FRANKFURT-1-AD-1" \
-            --compartment-id "$MY_COMP_ID" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
-            --display-name "Binance-Bot-ARM" \
-            --source-details "{\"image_id\": \"$MY_IMAGE_ID\", \"source_type\": \"image\"}" \
-            --subnet-id "$MY_SUBNET_ID" \
-            --assign-public-ip true
+          set -euo pipefail
+
+          echo "Listing availability domains..."
+          AD_LIST=$(oci iam availability-domain list \
+            --compartment-id "$TENANCY_OCID" \
+            --query 'data[].name' \
+            --raw-output)
+
+          if [ -z "$AD_LIST" ]; then
+            echo "Could not fetch availability domains."
+            exit 1
+          fi
+
+          echo "AD candidates:"
+          echo "$AD_LIST"
+
+          success=0
+          while IFS= read -r ad; do
+            [ -z "$ad" ] && continue
+            echo "Trying launch in AD: $ad"
+
+            set +e
+            output=$(oci compute instance launch \
+              --availability-domain "$ad" \
+              --compartment-id "$COMPARTMENT_ID" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
+              --display-name "Binance-Bot-ARM" \
+              --source-details "{\"image_id\": \"$IMAGE_ID\", \"source_type\": \"image\"}" \
+              --subnet-id "$SUBNET_ID" \
+              --assign-public-ip true 2>&1)
+            code=$?
+            set -e
+
+            if [ "$code" -eq 0 ]; then
+              echo "Instance launch SUCCESS in $ad"
+              echo "$output"
+              success=1
+              break
+            fi
+
+            echo "Launch failed in $ad (exit=$code)."
+            echo "$output"
+
+            if echo "$output" | grep -qiE 'OutOfHostCapacity|Out of host capacity|Out of capacity'; then
+              echo "Capacity yok, sonraki AD denenecek."
+              continue
+            fi
+
+            if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests|ServiceError'; then
+              echo "Geçici/limit kaynaklı hata, sonraki AD denenecek."
+              continue
+            fi
+
+            echo "Beklenmeyen hata nedeniyle workflow fail ediliyor."
+            exit "$code"
+          done <<< "$AD_LIST"
+
+          if [ "$success" -eq 1 ]; then
+            exit 0
+          fi
+
+          echo "No capacity now. Workflow başarılı bitti, 5 dk sonra tekrar denenecek."
+          exit 0
