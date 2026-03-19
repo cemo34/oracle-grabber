@@ -13,6 +13,7 @@ jobs:
       SUBNET_ID: ${{ secrets.SUBNET_ID }}
       COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
       SUPPRESS_LABEL_WARNING: true
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
 
     steps:
       - name: Install OCI CLI
@@ -31,19 +32,61 @@ jobs:
         run: |
           set -euo pipefail
 
+          normalize() {
+            # Trim whitespace/newlines and remove wrapping single or double quotes.
+            printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+          }
+
+          user_ocid=$(normalize "${OCI_USER_OCID:-}")
+          tenancy_ocid=$(normalize "${OCI_TENANCY_OCID:-}")
+          region=$(normalize "${OCI_REGION:-}")
+          fingerprint=$(normalize "${OCI_FINGERPRINT:-}")
+          private_key=$(printf '%s' "${OCI_PRIVATE_KEY:-}" | tr -d '\r')
+
+          # Normalize fingerprint for validation/write.
+          fingerprint=$(printf '%s' "$fingerprint" | tr 'A-F' 'a-f')
+
+          if ! printf '%s' "$tenancy_ocid" | grep -Eq '^ocid1\.tenancy\..+'; then
+            echo "Invalid OCI_TENANCY_OCID secret format. Expected an OCID like ocid1.tenancy...."
+            exit 1
+          fi
+
+          if ! printf '%s' "$user_ocid" | grep -Eq '^ocid1\.user\..+'; then
+            echo "Invalid OCI_USER_OCID secret format. Expected an OCID like ocid1.user...."
+            exit 1
+          fi
+
+          if ! printf '%s' "$fingerprint" | grep -Eq '^([0-9a-f]{2}:){15}[0-9a-f]{2}$'; then
+            echo "Invalid OCI_FINGERPRINT format. Expected 16 hex byte pairs separated by ':'"
+            exit 1
+          fi
+
+          if [ -z "$region" ]; then
+            echo "OCI_REGION is empty."
+            exit 1
+          fi
+
+          if [ -z "$private_key" ]; then
+            echo "OCI_PRIVATE_KEY is empty."
+            exit 1
+          fi
+
           mkdir -p ~/.oci
-          printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          printf '%s\n' "$private_key" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
           cat > ~/.oci/config <<CFG
           [DEFAULT]
-          user=$OCI_USER_OCID
-          fingerprint=$OCI_FINGERPRINT
-          tenancy=$OCI_TENANCY_OCID
-          region=$OCI_REGION
+          user=$user_ocid
+          fingerprint=$fingerprint
+          tenancy=$tenancy_ocid
+          region=$region
           key_file=~/.oci/oci_api_key.pem
           CFG
 
+          chmod 600 ~/.oci/config
+
+          # Fast sanity check before main launch logic.
           oci iam region list --output table >/dev/null
 
       - name: Launch ARM Instance If None Exists
