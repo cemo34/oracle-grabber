@@ -23,7 +23,8 @@ jobs:
           set -euo pipefail
           missing=0
 
-          for key in IMAGE_ID SUBNET_ID COMPARTMENT_ID; do
+          # IMAGE_ID is optional now (auto discovery is supported)
+          for key in SUBNET_ID COMPARTMENT_ID; do
             if [ -z "${!key:-}" ]; then
               echo "Missing secret: $key"
               missing=1
@@ -79,40 +80,77 @@ jobs:
 
           chmod 600 ~/.oci/config
 
-      - name: Validate IMAGE_ID exists and is available
+      - name: Resolve and validate ARM IMAGE_ID
         env:
           IMAGE_ID: ${{ secrets.IMAGE_ID }}
-        run: |
-          set -euo pipefail
-          if ! [[ "$IMAGE_ID" =~ ^ocid1\.image\.oc1\..+ ]]; then
-            echo "IMAGE_ID format looks invalid: $IMAGE_ID"
-            exit 1
-          fi
-
-          set +e
-          image_json=$(oci compute image get --image-id "$IMAGE_ID" 2>&1)
-          code=$?
-          set -e
-
-          if [ "$code" -ne 0 ]; then
-            echo "IMAGE_ID could not be fetched. Check region/compartment/image OCID."
-            echo "$image_json"
-            exit "$code"
-          fi
-
-          echo "IMAGE_ID is valid."
-
-      - name: Try create ARM instance in all ADs
-        env:
-          IMAGE_ID: ${{ secrets.IMAGE_ID }}
-          SUBNET_ID: ${{ secrets.SUBNET_ID }}
-          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+          SUPPRESS_LABEL_WARNING: True
         run: |
           set -euo pipefail
 
           TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
           if [ -z "$TENANCY_OCID" ]; then
             echo "Could not determine tenancy OCID from ~/.oci/config"
+            exit 1
+          fi
+
+          INPUT_IMAGE_ID=$(printf '%s' "${IMAGE_ID:-}" | tr -d '\r' | xargs || true)
+          RESOLVED_IMAGE_ID=""
+
+          if [ -n "$INPUT_IMAGE_ID" ] && [[ "$INPUT_IMAGE_ID" =~ ^ocid1\.image\.oc1\..+ ]]; then
+            set +e
+            oci compute image get --image-id "$INPUT_IMAGE_ID" >/tmp/image_check.json 2>/tmp/image_check.err
+            code=$?
+            set -e
+            if [ "$code" -eq 0 ]; then
+              RESOLVED_IMAGE_ID="$INPUT_IMAGE_ID"
+              echo "Provided IMAGE_ID is valid."
+            else
+              echo "Provided IMAGE_ID is invalid/unreachable, falling back to auto-discovery."
+              cat /tmp/image_check.err || true
+            fi
+          else
+            if [ -n "$INPUT_IMAGE_ID" ]; then
+              echo "Provided IMAGE_ID format invalid, auto-discovery will be used: $INPUT_IMAGE_ID"
+            else
+              echo "IMAGE_ID not set, auto-discovery will be used."
+            fi
+          fi
+
+          if [ -z "$RESOLVED_IMAGE_ID" ]; then
+            echo "Discovering latest AVAILABLE image compatible with VM.Standard.A1.Flex..."
+            RESOLVED_IMAGE_ID=$(oci compute image list \
+              --compartment-id "$TENANCY_OCID" \
+              --all \
+              --shape "VM.Standard.A1.Flex" \
+              --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE'], &\"time-created\"))[0].id" \
+              --raw-output)
+          fi
+
+          if [ -z "$RESOLVED_IMAGE_ID" ] || [ "$RESOLVED_IMAGE_ID" = "null" ]; then
+            echo "Could not resolve a valid ARM image OCID automatically."
+            exit 1
+          fi
+
+          oci compute image get --image-id "$RESOLVED_IMAGE_ID" >/dev/null
+          echo "RESOLVED_IMAGE_ID=$RESOLVED_IMAGE_ID" >> "$GITHUB_ENV"
+          echo "Using image: ${RESOLVED_IMAGE_ID:0:42}..."
+
+      - name: Try create ARM instance in all ADs
+        env:
+          SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+          SUPPRESS_LABEL_WARNING: True
+        run: |
+          set -euo pipefail
+
+          TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
+          if [ -z "$TENANCY_OCID" ]; then
+            echo "Could not determine tenancy OCID from ~/.oci/config"
+            exit 1
+          fi
+
+          if [ -z "${RESOLVED_IMAGE_ID:-}" ]; then
+            echo "RESOLVED_IMAGE_ID is missing."
             exit 1
           fi
 
@@ -142,7 +180,7 @@ jobs:
               --shape "VM.Standard.A1.Flex" \
               --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
               --display-name "Binance-Bot-ARM" \
-              --source-details "{\"image_id\": \"$IMAGE_ID\", \"source_type\": \"image\"}" \
+              --source-details "{\"image_id\": \"$RESOLVED_IMAGE_ID\", \"source_type\": \"image\"}" \
               --subnet-id "$SUBNET_ID" \
               --assign-public-ip true 2>&1)
             code=$?
