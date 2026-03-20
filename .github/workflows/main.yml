@@ -43,7 +43,7 @@ jobs:
       - name: Validate required secrets
         run: |
           set -euo pipefail
-          req=(VM_SSH_PUBLIC_KEY OCI_CONFIG_SECRET OCI_KEY_FILE_SECRET)
+          req=(OCI_CONFIG_SECRET OCI_KEY_FILE_SECRET)
           for k in "${req[@]}"; do
             if [ -z "${!k:-}" ]; then
               echo "Missing required secret/env: $k"
@@ -55,6 +55,9 @@ jobs:
           fi
           if [ -z "${SUBNET_ID:-}" ]; then
             echo "SUBNET_ID not provided. Will auto-discover a public subnet in target compartment."
+          fi
+          if [ -z "${VM_SSH_PUBLIC_KEY:-}" ]; then
+            echo "VM_SSH_PUBLIC_KEY not provided. Launch will continue without SSH key metadata."
           fi
 
       - name: Configure OCI CLI
@@ -101,19 +104,21 @@ jobs:
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/main.yml/disable" >/dev/null || true
           }
 
-          SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$VM_SSH_PUBLIC_KEY" | tr -d '\r')
-          if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -q '\\n'; then
-            SSH_PUBLIC_KEY_CLEAN=$(printf '%b' "$SSH_PUBLIC_KEY_CLEAN")
-          fi
-          SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | tr -d '\n')
+          METADATA_JSON=''
+          if [ -n "${VM_SSH_PUBLIC_KEY:-}" ]; then
+            SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$VM_SSH_PUBLIC_KEY" | tr -d '\r')
+            if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -q '\\n'; then
+              SSH_PUBLIC_KEY_CLEAN=$(printf '%b' "$SSH_PUBLIC_KEY_CLEAN")
+            fi
+            SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | tr -d '\n')
 
-          if ! printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
-            echo "VM_SSH_PUBLIC_KEY invalid format."
-            exit 1
+            if ! printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
+              echo "VM_SSH_PUBLIC_KEY format invalid; continuing without SSH metadata."
+            else
+              export SSH_PUBLIC_KEY_CLEAN
+              METADATA_JSON=$(python3 -c 'import json, os; print(json.dumps({"ssh_authorized_keys": os.environ["SSH_PUBLIC_KEY_CLEAN"]}))')
+            fi
           fi
-
-          export SSH_PUBLIC_KEY_CLEAN
-          METADATA_JSON=$(python3 -c 'import json, os; print(json.dumps({"ssh_authorized_keys": os.environ["SSH_PUBLIC_KEY_CLEAN"]}))')
 
           TENANCY_OCID=$(awk -F= '/^tenancy=/{print $2; exit}' ~/.oci/config | tr -d '[:space:]')
           if [ -z "$TENANCY_OCID" ]; then
@@ -201,10 +206,13 @@ jobs:
               --shape "$shape"
               --display-name "$display_name"
               --source-details "{\"image_id\": \"$image_id\", \"source_type\": \"image\"}"
-              --metadata "$METADATA_JSON"
               --subnet-id "$SUBNET_ID"
               --assign-public-ip true
               --shape-config "$shape_cfg")
+
+            if [ -n "$METADATA_JSON" ]; then
+              cmd+=(--metadata "$METADATA_JSON")
+            fi
 
             set +e
             output=$("${cmd[@]}" 2>&1)
