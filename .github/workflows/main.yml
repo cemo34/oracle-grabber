@@ -11,7 +11,8 @@ permissions:
 
 concurrency:
   group: oracle-capacity-hunter-main
-  cancel-in-progress: true
+  # Do not cancel in-progress hunt; canceling causes wasted setup and no launch attempt.
+  cancel-in-progress: false
 
 jobs:
   hunt-capacity:
