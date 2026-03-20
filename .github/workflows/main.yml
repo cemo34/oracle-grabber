@@ -1,6 +1,10 @@
 name: Oracle Capacity Hunter
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/main.yml'
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -22,11 +26,9 @@ jobs:
       COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID || vars.COMPARTMENT_ID }}
       VM_SSH_PUBLIC_KEY: ${{ secrets.VM_SSH_PUBLIC_KEY || vars.VM_SSH_PUBLIC_KEY }}
 
-      # Preferred mode
       OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG || vars.OCI_CONFIG }}
       OCI_KEY_FILE_SECRET: ${{ secrets.OCI_KEY_FILE || vars.OCI_KEY_FILE }}
 
-      # Backward-compatible split mode
       OCI_USER_OCID: ${{ secrets.OCI_USER_OCID || vars.OCI_USER_OCID }}
       OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID || vars.OCI_TENANCY_OCID }}
       OCI_REGION: ${{ secrets.OCI_REGION || vars.OCI_REGION }}
@@ -34,7 +36,6 @@ jobs:
       OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY || vars.OCI_PRIVATE_KEY }}
 
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
-      SUPPRESS_LABEL_WARNING: "true"
 
     steps:
       - name: Ensure Python is available
@@ -65,20 +66,18 @@ jobs:
 
           if [ "$have_full" -eq 0 ] && [ "$have_split" -eq 0 ]; then
             echo "Missing OCI credentials. Provide either:"
-            echo "1) OCI_CONFIG + OCI_KEY_FILE"
+            echo "- OCI_CONFIG + OCI_KEY_FILE"
             echo "or"
-            echo "2) OCI_USER_OCID + OCI_TENANCY_OCID + OCI_REGION + OCI_FINGERPRINT + OCI_PRIVATE_KEY"
+            echo "- OCI_USER_OCID + OCI_TENANCY_OCID + OCI_REGION + OCI_FINGERPRINT + OCI_PRIVATE_KEY"
             exit 1
           fi
 
           if [ -z "${COMPARTMENT_ID:-}" ]; then
             echo "COMPARTMENT_ID not provided. Will fallback to tenancy OCID from OCI config."
           fi
-
           if [ -z "${SUBNET_ID:-}" ]; then
             echo "SUBNET_ID not provided. Will auto-discover a public subnet in target compartment."
           fi
-
           if [ -z "${VM_SSH_PUBLIC_KEY:-}" ]; then
             echo "VM_SSH_PUBLIC_KEY not provided. Launch will continue without SSH key metadata."
           fi
@@ -89,10 +88,7 @@ jobs:
           mkdir -p ~/.oci
 
           trim_quotes_spaces() {
-            printf '%s' "$1" \
-              | tr -d '\r' \
-              | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-                    -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+            printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
           }
 
           extract_ocid() {
@@ -110,17 +106,11 @@ jobs:
           if [ -n "${OCI_CONFIG_SECRET:-}" ] && [ -n "${OCI_KEY_FILE_SECRET:-}" ]; then
             cfg_content=$(printf '%s' "$OCI_CONFIG_SECRET" | tr -d '\r')
             key_content=$(printf '%s' "$OCI_KEY_FILE_SECRET" | tr -d '\r')
-
-            if printf '%s' "$cfg_content" | grep -q '\\n'; then
-              cfg_content=$(printf '%b' "$cfg_content")
-            fi
-            if printf '%s' "$key_content" | grep -q '\\n'; then
-              key_content=$(printf '%b' "$key_content")
-            fi
+            if printf '%s' "$cfg_content" | grep -q '\\n'; then cfg_content=$(printf '%b' "$cfg_content"); fi
+            if printf '%s' "$key_content" | grep -q '\\n'; then key_content=$(printf '%b' "$key_content"); fi
 
             printf '%s\n' "$cfg_content" > ~/.oci/config
             printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
-
             if grep -q '^key_file=' ~/.oci/config; then
               sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
             else
@@ -138,10 +128,7 @@ jobs:
             region=$(extract_region "$raw_region")
             fingerprint=$(extract_fingerprint "$raw_fingerprint")
             private_key=$(printf '%s' "$raw_private_key")
-
-            if printf '%s' "$private_key" | grep -q '\\n'; then
-              private_key=$(printf '%b' "$private_key")
-            fi
+            if printf '%s' "$private_key" | grep -q '\\n'; then private_key=$(printf '%b' "$private_key"); fi
 
             if [ -z "$tenancy_ocid" ] || [ -z "$user_ocid" ] || [ -z "$region" ] || [ -z "$fingerprint" ] || [ -z "$private_key" ]; then
               echo "Split OCI secrets invalid or incomplete."
@@ -171,26 +158,17 @@ jobs:
           set -euo pipefail
 
           disable_workflow() {
-            echo "Disabling workflow (capacity achieved)."
-            curl -fsS -X PUT \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/main.yml/disable" >/dev/null || true
+            curl -fsS -X PUT -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/main.yml/disable" >/dev/null || true
           }
 
           METADATA_JSON=''
           if [ -n "${VM_SSH_PUBLIC_KEY:-}" ]; then
             SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$VM_SSH_PUBLIC_KEY" | tr -d '\r')
-            if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -q '\\n'; then
-              SSH_PUBLIC_KEY_CLEAN=$(printf '%b' "$SSH_PUBLIC_KEY_CLEAN")
-            fi
+            if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -q '\\n'; then SSH_PUBLIC_KEY_CLEAN=$(printf '%b' "$SSH_PUBLIC_KEY_CLEAN"); fi
             SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | tr -d '\n')
-
             if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
               export SSH_PUBLIC_KEY_CLEAN
               METADATA_JSON=$(python3 -c 'import json, os; print(json.dumps({"ssh_authorized_keys": os.environ["SSH_PUBLIC_KEY_CLEAN"]}))')
-            else
-              echo "VM_SSH_PUBLIC_KEY format invalid; continuing without SSH metadata."
             fi
           fi
 
@@ -200,26 +178,19 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${COMPARTMENT_ID:-}" ]; then
-            COMPARTMENT_ID="$TENANCY_OCID"
-            echo "Using tenancy as fallback COMPARTMENT_ID: ${COMPARTMENT_ID:0:22}..."
-          fi
+          if [ -z "${COMPARTMENT_ID:-}" ]; then COMPARTMENT_ID="$TENANCY_OCID"; fi
 
           if [ -z "${SUBNET_ID:-}" ]; then
-            echo "Trying to auto-discover a public subnet from compartment ${COMPARTMENT_ID}..."
             subnet_json=$(oci network subnet list --max-retries 0 --compartment-id "$COMPARTMENT_ID" --all --output json)
             SUBNET_ID=$(printf '%s' "$subnet_json" | python3 -c "import json,sys; d=json.load(sys.stdin).get('data',[]); c=[s.get('id') for s in d if s.get('lifecycle-state')=='AVAILABLE' and not s.get('prohibit-public-ip-on-vnic', True)]; print(c[0] if c else '')")
-
             if [ -z "$SUBNET_ID" ] || [ "$SUBNET_ID" = "null" ]; then
-              echo "No suitable public subnet found. Set SUBNET_ID secret/variable explicitly."
+              echo "No suitable public subnet found. Set SUBNET_ID explicitly."
               exit 1
             fi
-            echo "Auto-discovered SUBNET_ID: ${SUBNET_ID:0:22}..."
           fi
 
           EXISTING_JSON=$(oci compute instance list --max-retries 0 --compartment-id "$COMPARTMENT_ID" --all --output json)
           existing_arm_count=$(printf '%s' "$EXISTING_JSON" | python3 -c "import json,sys; active={'PROVISIONING','STARTING','RUNNING','STOPPING','STOPPED'}; d=json.load(sys.stdin).get('data',[]); print(sum(1 for i in d if i.get('display-name')=='Binance-Bot-ARM-Ubuntu24' and i.get('lifecycle-state') in active))")
-
           if [ "${existing_arm_count:-0}" -gt 0 ]; then
             echo "Existing ARM bot instance detected (${existing_arm_count})."
             disable_workflow
@@ -228,65 +199,31 @@ jobs:
 
           AD_JSON=$(oci iam availability-domain list --max-retries 0 --compartment-id "$TENANCY_OCID" --output json)
           AD_LIST=$(printf '%s' "$AD_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('\\n'.join([x.get('name','') for x in d.get('data',[]) if x.get('name')]))")
-
           if [ -z "$AD_LIST" ]; then
             echo "Could not fetch availability domains."
             exit 1
           fi
 
-          echo "AD candidates:"
-          echo "$AD_LIST"
-
           shape="VM.Standard.A1.Flex"
           shape_cfg='{"ocpus": 4, "memoryInGBs": 24}'
           display_name="Binance-Bot-ARM-Ubuntu24"
 
-          image_id=$(oci compute image list \
-            --max-retries 0 \
-            --compartment-id "$TENANCY_OCID" \
-            --all \
-            --shape "$shape" \
-            --operating-system "Canonical Ubuntu" \
-            --operating-system-version "24.04" \
-            --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE'], &\"time-created\"))[0].id" \
-            --raw-output)
-
+          image_id=$(oci compute image list --max-retries 0 --compartment-id "$TENANCY_OCID" --all --shape "$shape" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE'], &\"time-created\"))[0].id" --raw-output)
           if [ -z "$image_id" ] || [ "$image_id" = "null" ]; then
-            image_id=$(oci compute image list \
-              --max-retries 0 \
-              --compartment-id "$TENANCY_OCID" \
-              --all \
-              --shape "$shape" \
-              --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE' && contains(\"display-name\", 'Ubuntu') && contains(\"display-name\", '24.04')], &\"time-created\"))[0].id" \
-              --raw-output)
+            image_id=$(oci compute image list --max-retries 0 --compartment-id "$TENANCY_OCID" --all --shape "$shape" --query "reverse(sort_by(data[?\"lifecycle-state\"=='AVAILABLE' && contains(\"display-name\", 'Ubuntu') && contains(\"display-name\", '24.04')], &\"time-created\"))[0].id" --raw-output)
           fi
-
           if [ -z "$image_id" ] || [ "$image_id" = "null" ]; then
             echo "No Ubuntu 24 image found for ARM shape."
             exit 1
           fi
-
-          echo "Resolved image for ARM: ${image_id:0:42}..."
 
           launched=0
           while IFS= read -r ad; do
             [ -z "$ad" ] && continue
             echo "Trying arm in AD: $ad"
 
-            cmd=(oci compute instance launch
-              --max-retries 0
-              --availability-domain "$ad"
-              --compartment-id "$COMPARTMENT_ID"
-              --shape "$shape"
-              --display-name "$display_name"
-              --source-details "{\"image_id\": \"$image_id\", \"source_type\": \"image\"}"
-              --subnet-id "$SUBNET_ID"
-              --assign-public-ip true
-              --shape-config "$shape_cfg")
-
-            if [ -n "$METADATA_JSON" ]; then
-              cmd+=(--metadata "$METADATA_JSON")
-            fi
+            cmd=(oci compute instance launch --max-retries 0 --availability-domain "$ad" --compartment-id "$COMPARTMENT_ID" --shape "$shape" --display-name "$display_name" --source-details "{\"image_id\": \"$image_id\", \"source_type\": \"image\"}" --subnet-id "$SUBNET_ID" --assign-public-ip true --shape-config "$shape_cfg")
+            if [ -n "$METADATA_JSON" ]; then cmd+=(--metadata "$METADATA_JSON"); fi
 
             set +e
             output=$("${cmd[@]}" 2>&1)
@@ -295,38 +232,19 @@ jobs:
 
             if [ "$code" -eq 0 ]; then
               echo "Launch SUCCESS (arm, $ad)"
-              echo "$output"
               launched=1
               break
             fi
 
-            echo "Launch failed (arm, $ad):"
             echo "$output"
-
-            if echo "$output" | grep -qiE 'OutOfHostCapacity|Out of host capacity|Out of capacity'; then
-              echo "Capacity yok, sonraki AD denenecek."
+            if echo "$output" | grep -qiE 'OutOfHostCapacity|Out of host capacity|Out of capacity|LimitExceeded|TooManyRequests|RequestException|timed out'; then
               continue
             fi
-
-            if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests'; then
-              echo "Limit hatasi, sonraki AD denenecek."
-              continue
-            fi
-
-            if echo "$output" | grep -qiE 'RequestException|connection to endpoint timed out|timed out|Connection timed out'; then
-              echo "Gecici timeout, sonraki AD denenecek."
-              continue
-            fi
-
-            echo "Beklenmeyen hata nedeniyle workflow fail ediliyor."
             exit "$code"
           done <<< "$AD_LIST"
 
           if [ "$launched" -eq 1 ]; then
-            echo "ARM target launched successfully."
             disable_workflow
-            exit 0
           fi
 
-          echo "No ARM capacity now (or transient OCI timeouts)."
           exit 0
