@@ -43,15 +43,18 @@ jobs:
       - name: Validate required secrets
         run: |
           set -euo pipefail
-          req=(COMPARTMENT_ID VM_SSH_PUBLIC_KEY OCI_CONFIG_SECRET OCI_KEY_FILE_SECRET)
+          req=(VM_SSH_PUBLIC_KEY OCI_CONFIG_SECRET OCI_KEY_FILE_SECRET)
           for k in "${req[@]}"; do
             if [ -z "${!k:-}" ]; then
               echo "Missing required secret/env: $k"
               exit 1
             fi
           done
+          if [ -z "${COMPARTMENT_ID:-}" ]; then
+            echo "COMPARTMENT_ID not provided. Will fallback to tenancy OCID from OCI config."
+          fi
           if [ -z "${SUBNET_ID:-}" ]; then
-            echo "SUBNET_ID not provided. Will auto-discover a public subnet in COMPARTMENT_ID."
+            echo "SUBNET_ID not provided. Will auto-discover a public subnet in target compartment."
           fi
 
       - name: Configure OCI CLI
@@ -116,6 +119,11 @@ jobs:
           if [ -z "$TENANCY_OCID" ]; then
             echo "Could not determine tenancy OCID from ~/.oci/config"
             exit 1
+          fi
+
+          if [ -z "${COMPARTMENT_ID:-}" ]; then
+            COMPARTMENT_ID="$TENANCY_OCID"
+            echo "Using tenancy as fallback COMPARTMENT_ID: ${COMPARTMENT_ID:0:22}..."
           fi
 
           if [ -z "${SUBNET_ID:-}" ]; then
