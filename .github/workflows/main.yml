@@ -5,135 +5,102 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: oracle-capacity-hunter-main
+  cancel-in-progress: true
+
 jobs:
   hunt-capacity:
     runs-on: ubuntu-latest
-    environment: OCI_CONFIG
+    timeout-minutes: 7
     env:
       SUBNET_ID: ${{ secrets.SUBNET_ID }}
       COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
       VM_SSH_PUBLIC_KEY: ${{ secrets.VM_SSH_PUBLIC_KEY }}
-      SUPPRESS_LABEL_WARNING: true
+      OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
+      OCI_KEY_FILE_SECRET: ${{ secrets.OCI_KEY_FILE }}
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+      SUPPRESS_LABEL_WARNING: "true"
 
     steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-oci-cli-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-oci-cli-
+
       - name: Install OCI CLI
         run: |
           set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install oci-cli
+          python3 -m pip install --user --disable-pip-version-check --prefer-binary oci-cli==3.76.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          oci --version
 
-      - name: Configure OCI CLI
-        env:
-          OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
-          OCI_KEY_FILE_SECRET: ${{ secrets.OCI_KEY_FILE }}
-          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_REGION: ${{ secrets.OCI_REGION }}
-          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+      - name: Validate required secrets
         run: |
           set -euo pipefail
-          export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
+          req=(SUBNET_ID COMPARTMENT_ID VM_SSH_PUBLIC_KEY OCI_CONFIG_SECRET OCI_KEY_FILE_SECRET)
+          for k in "${req[@]}"; do
+            if [ -z "${!k:-}" ]; then
+              echo "Missing required secret/env: $k"
+              exit 1
+            fi
+          done
+
+      - name: Configure OCI CLI
+        run: |
+          set -euo pipefail
           mkdir -p ~/.oci
 
-          # Preferred mode: full OCI config + key secrets.
-          if [ -n "${OCI_CONFIG_SECRET:-}" ] && [ -n "${OCI_KEY_FILE_SECRET:-}" ]; then
-            cfg_content=$(printf '%s' "$OCI_CONFIG_SECRET" | tr -d '\r')
-            key_content=$(printf '%s' "$OCI_KEY_FILE_SECRET" | tr -d '\r')
-            if printf '%s' "$cfg_content" | grep -q '\\n'; then
-              cfg_content=$(printf '%b' "$cfg_content")
-            fi
-            if printf '%s' "$key_content" | grep -q '\\n'; then
-              key_content=$(printf '%b' "$key_content")
-            fi
-            printf '%s\n' "$cfg_content" > ~/.oci/config
-            printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
-            if grep -q '^key_file=' ~/.oci/config; then
-              sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
-            else
-              printf '%s\n' 'key_file=~/.oci/oci_api_key.pem' >> ~/.oci/config
-            fi
+          cfg_content=$(printf '%s' "$OCI_CONFIG_SECRET" | tr -d '\r')
+          key_content=$(printf '%s' "$OCI_KEY_FILE_SECRET" | tr -d '\r')
+
+          if printf '%s' "$cfg_content" | grep -q '\\n'; then
+            cfg_content=$(printf '%b' "$cfg_content")
+          fi
+          if printf '%s' "$key_content" | grep -q '\\n'; then
+            key_content=$(printf '%b' "$key_content")
+          fi
+
+          printf '%s\n' "$cfg_content" > ~/.oci/config
+          printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
+
+          if grep -q '^key_file=' ~/.oci/config; then
+            sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
           else
-            # Fallback mode: compose config from split secrets.
-            trim_quotes_spaces() {
-              printf '%s' "$1" \
-                | tr -d '\r' \
-                | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-                      -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
-            }
-            extract_ocid() {
-              printf '%s' "$1" | tr -d '\r' | grep -Eo "ocid1\.$2\.[A-Za-z0-9._:-]+" | head -n 1 || true
-            }
-            extract_fingerprint() {
-              printf '%s' "$1" | tr -d '\r' | grep -Eio '([0-9a-f]{2}:){15}[0-9a-f]{2}' | head -n 1 || true
-            }
-            extract_region() {
-              printf '%s' "$1" | tr -d '\r' | grep -Eio '[a-z]{2}-[a-z0-9-]+-[0-9]+' | head -n 1 || true
-            }
-
-            raw_user=$(trim_quotes_spaces "${OCI_USER_OCID:-}")
-            raw_tenancy=$(trim_quotes_spaces "${OCI_TENANCY_OCID:-}")
-            raw_region=$(trim_quotes_spaces "${OCI_REGION:-}")
-            raw_fingerprint=$(trim_quotes_spaces "${OCI_FINGERPRINT:-}")
-            raw_private_key=$(printf '%s' "${OCI_PRIVATE_KEY:-}" | tr -d '\r')
-
-            user_ocid=$(extract_ocid "$raw_user" user)
-            tenancy_ocid=$(extract_ocid "$raw_tenancy" tenancy)
-            region=$(extract_region "$raw_region")
-            fingerprint=$(extract_fingerprint "$raw_fingerprint")
-
-            private_key=$(printf '%s' "$raw_private_key")
-            if printf '%s' "$private_key" | grep -q '\\n'; then
-              private_key=$(printf '%b' "$private_key")
-            fi
-
-            if [ -z "$tenancy_ocid" ]; then
-              echo "Invalid OCI_TENANCY_OCID secret. Must contain ocid1.tenancy...."
-              exit 1
-            fi
-            if [ -z "$user_ocid" ]; then
-              echo "Invalid OCI_USER_OCID secret. Must contain ocid1.user...."
-              exit 1
-            fi
-            if [ -z "$fingerprint" ]; then
-              echo "Invalid OCI_FINGERPRINT secret. Must contain fingerprint like aa:bb:..."
-              exit 1
-            fi
-            if [ -z "$region" ]; then
-              echo "Invalid OCI_REGION secret. Must contain region like eu-frankfurt-1."
-              exit 1
-            fi
-            if [ -z "$private_key" ]; then
-              echo "OCI_PRIVATE_KEY is empty."
-              exit 1
-            fi
-
-            printf '%s\n' "$private_key" > ~/.oci/oci_api_key.pem
-            {
-              printf '%s\n' '[DEFAULT]'
-              printf 'user=%s\n' "$user_ocid"
-              printf 'fingerprint=%s\n' "$fingerprint"
-              printf 'tenancy=%s\n' "$tenancy_ocid"
-              printf 'region=%s\n' "$region"
-              printf '%s\n' 'key_file=~/.oci/oci_api_key.pem'
-            } > ~/.oci/config
+            printf '%s\n' 'key_file=~/.oci/oci_api_key.pem' >> ~/.oci/config
           fi
 
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
           oci setup repair-file-permissions --file ~/.oci/config >/dev/null 2>&1 || true
           oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem >/dev/null 2>&1 || true
-          oci iam region list --output table >/dev/null
+
+          oci iam region list --max-retries 0 --output table >/dev/null
 
       - name: Launch ARM Instance If None Exists
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
-          if [ -z "${VM_SSH_PUBLIC_KEY:-}" ]; then
-            echo "VM_SSH_PUBLIC_KEY secret is missing. Add your public key to environment secret VM_SSH_PUBLIC_KEY."
-            exit 1
-          fi
+          disable_workflow() {
+            echo "Disabling workflow (capacity achieved)."
+            curl -fsS -X PUT \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/main.yml/disable" >/dev/null || true
+          }
 
           SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$VM_SSH_PUBLIC_KEY" | tr -d '\r')
           if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -q '\\n'; then
@@ -142,7 +109,7 @@ jobs:
           SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | tr -d '\n')
 
           if ! printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
-            echo "VM_SSH_PUBLIC_KEY format looks invalid. Expected OpenSSH public key starting with ssh-ed25519/ssh-rsa/ecdsa-sha2-nistp256."
+            echo "VM_SSH_PUBLIC_KEY invalid format."
             exit 1
           fi
 
@@ -155,15 +122,16 @@ jobs:
             exit 1
           fi
 
-          EXISTING_JSON=$(oci compute instance list --compartment-id "$COMPARTMENT_ID" --all --output json)
+          EXISTING_JSON=$(oci compute instance list --max-retries 0 --compartment-id "$COMPARTMENT_ID" --all --output json)
           existing_arm_count=$(printf '%s' "$EXISTING_JSON" | python3 -c "import json,sys; active={'PROVISIONING','STARTING','RUNNING','STOPPING','STOPPED'}; d=json.load(sys.stdin).get('data',[]); print(sum(1 for i in d if i.get('display-name')=='Binance-Bot-ARM-Ubuntu24' and i.get('lifecycle-state') in active))")
 
           if [ "${existing_arm_count:-0}" -gt 0 ]; then
-            echo "Existing ARM bot instance detected (${existing_arm_count}). Skipping new ARM launch."
+            echo "Existing ARM bot instance detected (${existing_arm_count})."
+            disable_workflow
             exit 0
           fi
 
-          AD_JSON=$(oci iam availability-domain list --compartment-id "$TENANCY_OCID" --output json)
+          AD_JSON=$(oci iam availability-domain list --max-retries 0 --compartment-id "$TENANCY_OCID" --output json)
           AD_LIST=$(printf '%s' "$AD_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('\\n'.join([x.get('name','') for x in d.get('data',[]) if x.get('name')]))")
 
           if [ -z "$AD_LIST" ]; then
@@ -174,14 +142,12 @@ jobs:
           echo "AD candidates:"
           echo "$AD_LIST"
 
-          target="arm"
           shape="VM.Standard.A1.Flex"
           shape_cfg='{"ocpus": 4, "memoryInGBs": 24}'
           display_name="Binance-Bot-ARM-Ubuntu24"
 
-          echo "=== Target: $target / Shape: $shape ==="
-
           image_id=$(oci compute image list \
+            --max-retries 0 \
             --compartment-id "$TENANCY_OCID" \
             --all \
             --shape "$shape" \
@@ -191,8 +157,8 @@ jobs:
             --raw-output)
 
           if [ -z "$image_id" ] || [ "$image_id" = "null" ]; then
-            echo "Strict Ubuntu 24.04 image not found, trying fallback filter..."
             image_id=$(oci compute image list \
+              --max-retries 0 \
               --compartment-id "$TENANCY_OCID" \
               --all \
               --shape "$shape" \
@@ -207,22 +173,13 @@ jobs:
 
           echo "Resolved image for ARM: ${image_id:0:42}..."
 
-          set +e
-          oci compute image get --image-id "$image_id" >/tmp/image_get_arm.json 2>/tmp/image_get_arm.err
-          img_code=$?
-          set -e
-          if [ "$img_code" -ne 0 ]; then
-            echo "Resolved ARM image invalid:"
-            cat /tmp/image_get_arm.err || true
-            exit 1
-          fi
-
           launched=0
           while IFS= read -r ad; do
             [ -z "$ad" ] && continue
-            echo "Trying $target in AD: $ad"
+            echo "Trying arm in AD: $ad"
 
             cmd=(oci compute instance launch
+              --max-retries 0
               --availability-domain "$ad"
               --compartment-id "$COMPARTMENT_ID"
               --shape "$shape"
@@ -239,13 +196,13 @@ jobs:
             set -e
 
             if [ "$code" -eq 0 ]; then
-              echo "Launch SUCCESS ($target, $ad)"
+              echo "Launch SUCCESS (arm, $ad)"
               echo "$output"
               launched=1
               break
             fi
 
-            echo "Launch failed ($target, $ad):"
+            echo "Launch failed (arm, $ad):"
             echo "$output"
 
             if echo "$output" | grep -qiE 'OutOfHostCapacity|Out of host capacity|Out of capacity'; then
@@ -254,12 +211,12 @@ jobs:
             fi
 
             if echo "$output" | grep -qiE 'LimitExceeded|TooManyRequests'; then
-              echo "Gecici/limit kaynakli hata, sonraki AD denenecek."
+              echo "Limit hatasi, sonraki AD denenecek."
               continue
             fi
 
             if echo "$output" | grep -qiE 'RequestException|connection to endpoint timed out|timed out|Connection timed out'; then
-              echo "Gecici ag/OCI timeout hatasi, sonraki AD denenecek."
+              echo "Gecici timeout, sonraki AD denenecek."
               continue
             fi
 
@@ -269,8 +226,9 @@ jobs:
 
           if [ "$launched" -eq 1 ]; then
             echo "ARM target launched successfully."
+            disable_workflow
             exit 0
           fi
 
-          echo "No ARM capacity now (or transient OCI timeouts). Workflow basarili bitti, 5 dk sonra tekrar denenecek."
+          echo "No ARM capacity now (or transient OCI timeouts)."
           exit 0
