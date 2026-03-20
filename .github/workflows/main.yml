@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 7
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       SUBNET_ID: ${{ secrets.SUBNET_ID || vars.SUBNET_ID }}
       COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID || vars.COMPARTMENT_ID }}
       VM_SSH_PUBLIC_KEY: ${{ secrets.VM_SSH_PUBLIC_KEY }}
@@ -27,18 +28,10 @@ jobs:
       SUPPRESS_LABEL_WARNING: "true"
 
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-oci-cli-v1
-          restore-keys: |
-            ${{ runner.os }}-pip-oci-cli-
+      - name: Ensure Python is available
+        run: |
+          set -euo pipefail
+          python3 --version
 
       - name: Install OCI CLI
         run: |
