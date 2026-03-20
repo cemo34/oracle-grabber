@@ -20,6 +20,7 @@ concurrency:
 jobs:
   hunt-capacity:
     runs-on: ubuntu-latest
+    environment: OCI_CONFIG
     timeout-minutes: 7
     env:
       SUBNET_ID: ${{ secrets.SUBNET_ID || vars.SUBNET_ID }}
