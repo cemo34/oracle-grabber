@@ -18,12 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 7
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       SUBNET_ID: ${{ secrets.SUBNET_ID || vars.SUBNET_ID }}
       COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID || vars.COMPARTMENT_ID }}
-      VM_SSH_PUBLIC_KEY: ${{ secrets.VM_SSH_PUBLIC_KEY }}
-      OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG }}
-      OCI_KEY_FILE_SECRET: ${{ secrets.OCI_KEY_FILE }}
+      VM_SSH_PUBLIC_KEY: ${{ secrets.VM_SSH_PUBLIC_KEY || vars.VM_SSH_PUBLIC_KEY }}
+
+      # Preferred mode
+      OCI_CONFIG_SECRET: ${{ secrets.OCI_CONFIG || vars.OCI_CONFIG }}
+      OCI_KEY_FILE_SECRET: ${{ secrets.OCI_KEY_FILE || vars.OCI_KEY_FILE }}
+
+      # Backward-compatible split mode
+      OCI_USER_OCID: ${{ secrets.OCI_USER_OCID || vars.OCI_USER_OCID }}
+      OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID || vars.OCI_TENANCY_OCID }}
+      OCI_REGION: ${{ secrets.OCI_REGION || vars.OCI_REGION }}
+      OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT || vars.OCI_FINGERPRINT }}
+      OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY || vars.OCI_PRIVATE_KEY }}
+
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
       SUPPRESS_LABEL_WARNING: "true"
 
@@ -40,22 +49,36 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           oci --version
 
-      - name: Validate required secrets
+      - name: Validate inputs
         run: |
           set -euo pipefail
-          req=(OCI_CONFIG_SECRET OCI_KEY_FILE_SECRET)
-          for k in "${req[@]}"; do
-            if [ -z "${!k:-}" ]; then
-              echo "Missing required secret/env: $k"
-              exit 1
-            fi
-          done
+
+          have_full=0
+          if [ -n "${OCI_CONFIG_SECRET:-}" ] && [ -n "${OCI_KEY_FILE_SECRET:-}" ]; then
+            have_full=1
+          fi
+
+          have_split=0
+          if [ -n "${OCI_USER_OCID:-}" ] && [ -n "${OCI_TENANCY_OCID:-}" ] && [ -n "${OCI_REGION:-}" ] && [ -n "${OCI_FINGERPRINT:-}" ] && [ -n "${OCI_PRIVATE_KEY:-}" ]; then
+            have_split=1
+          fi
+
+          if [ "$have_full" -eq 0 ] && [ "$have_split" -eq 0 ]; then
+            echo "Missing OCI credentials. Provide either:"
+            echo "1) OCI_CONFIG + OCI_KEY_FILE"
+            echo "or"
+            echo "2) OCI_USER_OCID + OCI_TENANCY_OCID + OCI_REGION + OCI_FINGERPRINT + OCI_PRIVATE_KEY"
+            exit 1
+          fi
+
           if [ -z "${COMPARTMENT_ID:-}" ]; then
             echo "COMPARTMENT_ID not provided. Will fallback to tenancy OCID from OCI config."
           fi
+
           if [ -z "${SUBNET_ID:-}" ]; then
             echo "SUBNET_ID not provided. Will auto-discover a public subnet in target compartment."
           fi
+
           if [ -z "${VM_SSH_PUBLIC_KEY:-}" ]; then
             echo "VM_SSH_PUBLIC_KEY not provided. Launch will continue without SSH key metadata."
           fi
@@ -65,29 +88,80 @@ jobs:
           set -euo pipefail
           mkdir -p ~/.oci
 
-          cfg_content=$(printf '%s' "$OCI_CONFIG_SECRET" | tr -d '\r')
-          key_content=$(printf '%s' "$OCI_KEY_FILE_SECRET" | tr -d '\r')
+          trim_quotes_spaces() {
+            printf '%s' "$1" \
+              | tr -d '\r' \
+              | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                    -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+          }
 
-          if printf '%s' "$cfg_content" | grep -q '\\n'; then
-            cfg_content=$(printf '%b' "$cfg_content")
-          fi
-          if printf '%s' "$key_content" | grep -q '\\n'; then
-            key_content=$(printf '%b' "$key_content")
-          fi
+          extract_ocid() {
+            printf '%s' "$1" | tr -d '\r' | grep -Eo "ocid1\.$2\.[A-Za-z0-9._:-]+" | head -n 1 || true
+          }
 
-          printf '%s\n' "$cfg_content" > ~/.oci/config
-          printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
+          extract_fingerprint() {
+            printf '%s' "$1" | tr -d '\r' | grep -Eio '([0-9a-f]{2}:){15}[0-9a-f]{2}' | head -n 1 || true
+          }
 
-          if grep -q '^key_file=' ~/.oci/config; then
-            sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
+          extract_region() {
+            printf '%s' "$1" | tr -d '\r' | grep -Eio '[a-z]{2}-[a-z0-9-]+-[0-9]+' | head -n 1 || true
+          }
+
+          if [ -n "${OCI_CONFIG_SECRET:-}" ] && [ -n "${OCI_KEY_FILE_SECRET:-}" ]; then
+            cfg_content=$(printf '%s' "$OCI_CONFIG_SECRET" | tr -d '\r')
+            key_content=$(printf '%s' "$OCI_KEY_FILE_SECRET" | tr -d '\r')
+
+            if printf '%s' "$cfg_content" | grep -q '\\n'; then
+              cfg_content=$(printf '%b' "$cfg_content")
+            fi
+            if printf '%s' "$key_content" | grep -q '\\n'; then
+              key_content=$(printf '%b' "$key_content")
+            fi
+
+            printf '%s\n' "$cfg_content" > ~/.oci/config
+            printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
+
+            if grep -q '^key_file=' ~/.oci/config; then
+              sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
+            else
+              printf '%s\n' 'key_file=~/.oci/oci_api_key.pem' >> ~/.oci/config
+            fi
           else
-            printf '%s\n' 'key_file=~/.oci/oci_api_key.pem' >> ~/.oci/config
+            raw_user=$(trim_quotes_spaces "${OCI_USER_OCID:-}")
+            raw_tenancy=$(trim_quotes_spaces "${OCI_TENANCY_OCID:-}")
+            raw_region=$(trim_quotes_spaces "${OCI_REGION:-}")
+            raw_fingerprint=$(trim_quotes_spaces "${OCI_FINGERPRINT:-}")
+            raw_private_key=$(printf '%s' "${OCI_PRIVATE_KEY:-}" | tr -d '\r')
+
+            user_ocid=$(extract_ocid "$raw_user" user)
+            tenancy_ocid=$(extract_ocid "$raw_tenancy" tenancy)
+            region=$(extract_region "$raw_region")
+            fingerprint=$(extract_fingerprint "$raw_fingerprint")
+            private_key=$(printf '%s' "$raw_private_key")
+
+            if printf '%s' "$private_key" | grep -q '\\n'; then
+              private_key=$(printf '%b' "$private_key")
+            fi
+
+            if [ -z "$tenancy_ocid" ] || [ -z "$user_ocid" ] || [ -z "$region" ] || [ -z "$fingerprint" ] || [ -z "$private_key" ]; then
+              echo "Split OCI secrets invalid or incomplete."
+              exit 1
+            fi
+
+            printf '%s\n' "$private_key" > ~/.oci/oci_api_key.pem
+            {
+              printf '%s\n' '[DEFAULT]'
+              printf 'user=%s\n' "$user_ocid"
+              printf 'fingerprint=%s\n' "$fingerprint"
+              printf 'tenancy=%s\n' "$tenancy_ocid"
+              printf 'region=%s\n' "$region"
+              printf '%s\n' 'key_file=~/.oci/oci_api_key.pem'
+            } > ~/.oci/config
           fi
 
           chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
           oci setup repair-file-permissions --file ~/.oci/config >/dev/null 2>&1 || true
           oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem >/dev/null 2>&1 || true
-
           oci iam region list --max-retries 0 --output table >/dev/null
 
       - name: Launch ARM Instance If None Exists
@@ -112,11 +186,11 @@ jobs:
             fi
             SSH_PUBLIC_KEY_CLEAN=$(printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | tr -d '\n')
 
-            if ! printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
-              echo "VM_SSH_PUBLIC_KEY format invalid; continuing without SSH metadata."
-            else
+            if printf '%s' "$SSH_PUBLIC_KEY_CLEAN" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) '; then
               export SSH_PUBLIC_KEY_CLEAN
               METADATA_JSON=$(python3 -c 'import json, os; print(json.dumps({"ssh_authorized_keys": os.environ["SSH_PUBLIC_KEY_CLEAN"]}))')
+            else
+              echo "VM_SSH_PUBLIC_KEY format invalid; continuing without SSH metadata."
             fi
           fi
 
