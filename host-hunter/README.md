@@ -28,6 +28,18 @@ If OCI files are not available, installer exits safely and does not start timer.
 - `systemctl status arm-hunter.timer --no-pager`
 - `journalctl -u arm-hunter.service -f`
 
+## Multi-profile strategy (recommended)
+Use profile matrix to increase hit chance by trying smaller configs first.
+
+Example in `/etc/arm-hunter.env`:
+- `PROFILE_MATRIX=1:6,2:12,4:24`
+- `PREFER_SMALL_FIRST=true`
+
+Behavior:
+- Each cycle tries all ADs for `1/6`
+- If not available, tries all ADs for `2/12`
+- If not available, tries all ADs for `4/24`
+
 ## Behavior
 - Every minute, tries launch across all ADs.
 - If ARM instance already exists or launch succeeds:

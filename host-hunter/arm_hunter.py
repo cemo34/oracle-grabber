@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-import json
 import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import oci
 from oci.exceptions import ServiceError
@@ -79,6 +78,53 @@ def get_availability_domains(identity_client: oci.identity.IdentityClient, tenan
     return ads
 
 
+def parse_profile_matrix(default_ocpus: int, default_memory_gbs: int) -> List[Tuple[int, int]]:
+    raw = env("PROFILE_MATRIX")
+    if not raw:
+        return [(default_ocpus, default_memory_gbs)]
+
+    profiles: List[Tuple[int, int]] = []
+    for item in raw.split(","):
+        part = item.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            logging.warning("Ignoring malformed profile '%s' (expected OCPUS:MEMORY).", part)
+            continue
+
+        left, right = part.split(":", 1)
+        try:
+            ocpus = int(left.strip())
+            memory = int(right.strip())
+        except ValueError:
+            logging.warning("Ignoring malformed numeric profile '%s'.", part)
+            continue
+
+        if ocpus < 1 or memory < 1:
+            logging.warning("Ignoring invalid non-positive profile '%s'.", part)
+            continue
+
+        profiles.append((ocpus, memory))
+
+    if not profiles:
+        profiles = [(default_ocpus, default_memory_gbs)]
+
+    prefer_small = env("PREFER_SMALL_FIRST", "true").lower() in {"1", "true", "yes"}
+    if prefer_small:
+        profiles.sort(key=lambda p: (p[0], p[1]))
+
+    # Keep order while deduplicating
+    unique: List[Tuple[int, int]] = []
+    seen = set()
+    for p in profiles:
+        if p in seen:
+            continue
+        seen.add(p)
+        unique.append(p)
+
+    return unique
+
+
 def find_arm_image(compute_client: oci.core.ComputeClient, tenancy_id: str, shape: str) -> str:
     images = compute_client.list_images(
         compartment_id=tenancy_id,
@@ -130,7 +176,7 @@ def launch_once_per_ad(
         metadata = {"ssh_authorized_keys": ssh_public_key}
 
     for ad in ads:
-        logging.info("Trying ARM in AD: %s", ad)
+        logging.info("Trying ARM in AD: %s (profile %s OCPU / %s GB)", ad, ocpus, memory_gbs)
         try:
             details = oci.core.models.LaunchInstanceDetails(
                 availability_domain=ad,
@@ -156,7 +202,7 @@ def launch_once_per_ad(
             logging.info("Launch SUCCESS in %s. Instance ID: %s", ad, response.data.id)
             return True
         except ServiceError as e:
-            logging.warning("Launch failed in %s: %s", ad, e)
+            logging.warning("Launch failed in %s for profile %s/%s: %s", ad, ocpus, memory_gbs, e)
             if is_retryable(e):
                 continue
             raise
@@ -193,8 +239,10 @@ def main() -> int:
     compartment_id = env("COMPARTMENT_ID", tenancy_id)
     shape = env("SHAPE", "VM.Standard.A1.Flex")
     display_name = env("DISPLAY_NAME", "Binance-Bot-ARM-Ubuntu24")
-    ocpus = int(env("OCPUS", "4"))
-    memory_gbs = int(env("MEMORY_GBS", "24"))
+
+    default_ocpus = int(env("OCPUS", "4"))
+    default_memory_gbs = int(env("MEMORY_GBS", "24"))
+    profiles = parse_profile_matrix(default_ocpus, default_memory_gbs)
 
     ssh_public_key = read_ssh_key()
 
@@ -209,24 +257,26 @@ def main() -> int:
             run_cleanup_if_needed()
             return 0
 
-        launched = launch_once_per_ad(
-            compute_client=compute_client,
-            ads=ad_list,
-            compartment_id=compartment_id,
-            subnet_id=subnet_id,
-            image_id=image_id,
-            display_name=display_name,
-            shape=shape,
-            ocpus=ocpus,
-            memory_gbs=memory_gbs,
-            ssh_public_key=ssh_public_key,
-        )
+        logging.info("Profile plan for this cycle: %s", ", ".join([f"{o}:{m}" for o, m in profiles]))
 
-        if launched:
-            run_cleanup_if_needed()
-            return 0
+        for ocpus, memory_gbs in profiles:
+            launched = launch_once_per_ad(
+                compute_client=compute_client,
+                ads=ad_list,
+                compartment_id=compartment_id,
+                subnet_id=subnet_id,
+                image_id=image_id,
+                display_name=display_name,
+                shape=shape,
+                ocpus=ocpus,
+                memory_gbs=memory_gbs,
+                ssh_public_key=ssh_public_key,
+            )
+            if launched:
+                run_cleanup_if_needed()
+                return 0
 
-        logging.info("No capacity right now; will retry in next timer cycle.")
+        logging.info("No capacity right now for any profile; will retry in next timer cycle.")
         return 0
     except Exception as e:
         if is_retryable(e):
