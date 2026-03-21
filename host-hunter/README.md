@@ -11,18 +11,22 @@ It avoids GitHub runner re-install overhead and can remove itself after success.
 - `cleanup_hunter.sh`: stop units and delete `/opt/arm-hunter`
 - `arm-hunter.env.example`: runtime settings
 
-## Install on Oracle host
-1. Clone/pull this repo on host.
-2. Prepare OCI credentials:
-   - `/opt/arm-hunter/config`
-   - `/opt/arm-hunter/oci_api_key.pem`
-3. Run as root:
+## Quick go-live on Oracle host
+1. Clone or pull this repo on host.
+2. Run as root:
    - `cd host-hunter`
    - `sudo ./install_hunter.sh`
-4. Edit `/etc/arm-hunter.env` if needed.
-5. Verify:
-   - `systemctl status arm-hunter.timer --no-pager`
-   - `journalctl -u arm-hunter.service -f`
+
+The installer will auto-try to import:
+- OCI config from `~/.oci/config`
+- OCI key from `~/.oci/oci_api_key.pem`
+- SSH public key from `~/.ssh/id_ed25519.pub` or `~/.ssh/id_rsa.pub`
+
+If OCI files are not available, installer exits safely and does not start timer.
+
+## Verify
+- `systemctl status arm-hunter.timer --no-pager`
+- `journalctl -u arm-hunter.service -f`
 
 ## Behavior
 - Every minute, tries launch across all ADs.
