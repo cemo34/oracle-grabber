@@ -37,6 +37,7 @@ jobs:
       OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY || vars.OCI_PRIVATE_KEY }}
 
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+      SUPPRESS_LABEL_WARNING: "True"
 
     steps:
       - name: Ensure Python is available
@@ -112,6 +113,7 @@ jobs:
 
             printf '%s\n' "$cfg_content" > ~/.oci/config
             printf '%s\n' "$key_content" > ~/.oci/oci_api_key.pem
+            printf '%s\n' 'OCI_API_KEY' >> ~/.oci/oci_api_key.pem
             if grep -q '^key_file=' ~/.oci/config; then
               sed -i 's|^key_file=.*|key_file=~/.oci/oci_api_key.pem|' ~/.oci/config
             else
@@ -137,6 +139,7 @@ jobs:
             fi
 
             printf '%s\n' "$private_key" > ~/.oci/oci_api_key.pem
+            printf '%s\n' 'OCI_API_KEY' >> ~/.oci/oci_api_key.pem
             {
               printf '%s\n' '[DEFAULT]'
               printf 'user=%s\n' "$user_ocid"
