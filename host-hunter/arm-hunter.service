@@ -1,0 +1,17 @@
+[Unit]
+Description=Oracle ARM Capacity Hunter (oneshot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/arm-hunter.env
+WorkingDirectory=/opt/arm-hunter
+ExecStart=/opt/arm-hunter/.venv/bin/python /opt/arm-hunter/arm_hunter.py
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+TimeoutStartSec=420

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Oracle ARM Capacity Hunter every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=5s
+Persistent=true
+Unit=arm-hunter.service
+
+[Install]
+WantedBy=timers.target
